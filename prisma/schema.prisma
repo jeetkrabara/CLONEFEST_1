@@ -1,0 +1,112 @@
+// SecureBin - Prisma Schema
+// Owned by: Person 2 (Backend Platform - Lifecycle & APIs)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SecretState {
+  ACTIVE
+  VIEWED
+  EXPIRED
+  REVOKED
+  BURNED
+  DELETED
+}
+
+model Secret {
+  id                String       @id @default(uuid())
+  secretId          String       @unique
+  ownerTokenHash    String
+
+  // Text secrets
+  ciphertext        String?
+  iv                String?
+
+  // File secrets
+  encryptedBytes    Bytes?
+  fileIv            String?
+  metaIv            String?
+  encryptedMetadata String?
+
+  // Content-sensitivity analysis (Person 1) - encrypted, optional
+  encryptedAnalysis String?
+  analysisIv        String?
+
+  // Self-healing storage
+  checksum          String
+  healEvents        Int          @default(0)
+
+  state             SecretState  @default(ACTIVE)
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  policy            Policy?
+  viewers           Viewer[]
+  accessLogs        AccessLog[]
+  backup            SecretBackup?
+}
+
+model SecretBackup {
+  id                String   @id @default(uuid())
+  secretId          String   @unique
+  secret            Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  ciphertext        String?
+  iv                String?
+  encryptedBytes    Bytes?
+  fileIv            String?
+  metaIv            String?
+  encryptedMetadata String?
+  encryptedAnalysis String?
+  analysisIv        String?
+  checksum          String
+
+  createdAt         DateTime @default(now())
+}
+
+model Policy {
+  id                String   @id @default(uuid())
+  secretId          String   @unique
+  secret            Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  expiresAt         DateTime?
+  maxViews          Int?
+  burnAfterReading  Boolean  @default(false)
+
+  createdAt         DateTime @default(now())
+}
+
+model Viewer {
+  id             String   @id @default(uuid())
+  secretId       String
+  secret         Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  viewerLabel    String
+  wrappedKey     String
+  kdfSalt        String
+  wrapIv         String
+  kdfParams      Json
+
+  hasViewed      Boolean  @default(false)
+  viewedAt       DateTime?
+
+  createdAt      DateTime @default(now())
+
+  @@unique([secretId, viewerLabel])
+}
+
+model AccessLog {
+  id             String   @id @default(uuid())
+  secretId       String
+  secret         Secret   @relation(fields: [secretId], references: [id], onDelete: Cascade)
+
+  accessedAt     DateTime @default(now())
+  success        Boolean
+  viewerLabel    String?
+}
