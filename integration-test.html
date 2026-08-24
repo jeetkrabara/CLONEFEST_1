@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SecureBin — Integration Test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h2 { margin-top: 32px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+  textarea, input { width: 100%; padding: 8px; margin: 4px 0; box-sizing: border-box; }
+  button { padding: 8px 16px; margin: 6px 4px 6px 0; cursor: pointer; }
+  pre { background: #f4f4f4; padding: 12px; overflow-x: auto; white-space: pre-wrap; }
+  .ok { color: green; font-weight: bold; }
+  .fail { color: red; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>SecureBin — End-to-End Integration Test</h1>
+<p>Tests the real chain: <code>crypto/index.js</code> → <code>secretsApi.js</code> → live backend at
+<code>http://localhost:3000</code>. Open this file directly in a browser (double-click it, or serve it
+with any static server) with your backend already running.</p>
+
+<h2>1. Create a text secret</h2>
+<label>Secret text</label>
+<textarea id="secretText" rows="3">This is a test secret with an api_key=sk_live_abcdef1234567890 inside it.</textarea>
+<label>Viewer label</label>
+<input id="viewerLabel" value="Alice" />
+<label>Viewer password</label>
+<input id="viewerPassword" value="correct-horse-battery-staple" />
+<label>Max views (optional)</label>
+<input id="maxViews" value="5" />
+<button id="btnCreate">Create Secret</button>
+<pre id="createOut">(not run yet)</pre>
+
+<h2>2. View it back</h2>
+<p>Uses the <code>secretId</code> from step 1 automatically. Try the correct password first, then
+try a wrong one to confirm error handling works.</p>
+<label>Password to try</label>
+<input id="viewPassword" value="correct-horse-battery-staple" />
+<button id="btnView">View Secret</button>
+<pre id="viewOut">(not run yet)</pre>
+
+<h2>3. Status / stats / integrity (non-consuming)</h2>
+<button id="btnStatus">Get Status</button>
+<button id="btnStats">Get Stats</button>
+<button id="btnIntegrity">Check Integrity</button>
+<pre id="miscOut">(not run yet)</pre>
+
+<h2>4. Revoke</h2>
+<button id="btnRevoke">Revoke Secret</button>
+<pre id="revokeOut">(not run yet)</pre>
+
+<h2>5. Tamper test (proves tamper-evidence works)</h2>
+<p>Creates a fresh secret, then re-fetches and re-POSTs a corrupted version of the same
+data as a NEW secret with flipped ciphertext, and confirms decryption correctly fails
+rather than showing garbage. (Simplified simulation — flips a character in the ciphertext
+before decrypting locally.)</p>
+<button id="btnTamper">Run Tamper Test</button>
+<pre id="tamperOut">(not run yet)</pre>
+
+<script type="module">
+  import {
+    createTextSecret,
+    viewTextSecret,
+    getSecretStatus,
+    getSecretStats,
+    checkIntegrity,
+    revokeSecret,
+    toUserMessage,
+    healthCheck,
+  } from "./secretsApi.js";
+
+  let lastSecretId = null;
+  let lastOwnerToken = null;
+
+  function show(el, obj, isError = false) {
+    el.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+    el.className = isError ? "fail" : "ok";
+  }
+
+  // Fail fast if backend isn't reachable
+  healthCheck().then((ok) => {
+    if (!ok) {
+      document.body.insertAdjacentHTML(
+        "afterbegin",
+        `<p class="fail">⚠ Backend not reachable at http://localhost:3000 — start it with "npm run dev" first.</p>`
+      );
+    }
+  });
+
+  document.getElementById("btnCreate").onclick = async () => {
+    const out = document.getElementById("createOut");
+    out.textContent = "Creating...";
+    try {
+      const secretText = document.getElementById("secretText").value;
+      const label = document.getElementById("viewerLabel").value;
+      const password = document.getElementById("viewerPassword").value;
+      const maxViews = Number(document.getElementById("maxViews").value) || undefined;
+
+      const result = await createTextSecret({
+        secretText,
+        viewerPasswords: [{ label, password }],
+        maxViews,
+      });
+
+      lastSecretId = result.secretId;
+      lastOwnerToken = result.ownerToken;
+      show(out, result);
+    } catch (err) {
+      show(out, `${err.message}\n\nUser-facing: ${toUserMessage(err)}`, true);
+    }
+  };
+
+  document.getElementById("btnView").onclick = async () => {
+    const out = document.getElementById("viewOut");
+    if (!lastSecretId) return show(out, "Create a secret first (step 1).", true);
+    out.textContent = "Viewing...";
+    try {
+      const label = document.getElementById("viewerLabel").value;
+      const password = document.getElementById("viewPassword").value;
+      const { plaintext, analysis } = await viewTextSecret(lastSecretId, label, password);
+      show(out, { plaintext, analysis });
+    } catch (err) {
+      show(out, `${err.code || err.name}: ${err.message}\n\nUser-facing: ${toUserMessage(err)}`, true);
+    }
+  };
+
+  document.getElementById("btnStatus").onclick = async () => {
+    const out = document.getElementById("miscOut");
+    if (!lastSecretId) return show(out, "Create a secret first (step 1).", true);
+    try {
+      show(out, await getSecretStatus(lastSecretId));
+    } catch (err) {
+      show(out, toUserMessage(err), true);
+    }
+  };
+
+  document.getElementById("btnStats").onclick = async () => {
+    const out = document.getElementById("miscOut");
+    if (!lastSecretId) return show(out, "Create a secret first (step 1).", true);
+    try {
+      show(out, await getSecretStats(lastSecretId));
+    } catch (err) {
+      show(out, toUserMessage(err), true);
+    }
+  };
+
+  document.getElementById("btnIntegrity").onclick = async () => {
+    const out = document.getElementById("miscOut");
+    if (!lastSecretId) return show(out, "Create a secret first (step 1).", true);
+    try {
+      show(out, await checkIntegrity(lastSecretId));
+    } catch (err) {
+      show(out, toUserMessage(err), true);
+    }
+  };
+
+  document.getElementById("btnRevoke").onclick = async () => {
+    const out = document.getElementById("revokeOut");
+    if (!lastSecretId || !lastOwnerToken) return show(out, "Create a secret first (step 1).", true);
+    try {
+      show(out, await revokeSecret(lastSecretId, lastOwnerToken));
+    } catch (err) {
+      show(out, toUserMessage(err), true);
+    }
+  };
+
+  document.getElementById("btnTamper").onclick = async () => {
+    const out = document.getElementById("tamperOut");
+    out.textContent = "Running...";
+    try {
+      const { buildEnvelope } = await import("./crypto/index.js");
+      const label = "TamperTest";
+      const password = "tamper-test-password";
+      const envelope = await buildEnvelope("secret meant to be tampered with", [{ label, password }]);
+
+      // Flip a character in the ciphertext to simulate corruption/tampering
+      const original = envelope.ciphertext;
+      const flipped =
+        original.slice(0, 5) +
+        (original[5] === "A" ? "B" : "A") +
+        original.slice(6);
+
+      const tamperedResult = await createTextSecret({
+        secretText: "placeholder", // buildEnvelope already ran above; this call makes a second real envelope
+        viewerPasswords: [{ label, password }],
+      });
+
+      // Directly POST a hand-corrupted payload to prove server-side/GCM tamper detection,
+      // bypassing createTextSecret's normal envelope to inject the flipped ciphertext.
+      const res = await fetch("http://localhost:3000/api/secrets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...envelope, ciphertext: flipped }),
+      });
+      const created = await res.json();
+
+      try {
+        await viewTextSecret(created.secretId, label, password);
+        show(out, "FAIL — tampered secret decrypted successfully. This should never happen.", true);
+      } catch (err) {
+        if (err.code === "DECRYPT_FAILED" || err.code === "AUTH_FAILED") {
+          show(out, `PASS — tamper correctly detected and rejected.\nCode: ${err.code}\nMessage: ${err.message}`);
+        } else {
+          show(out, `Unexpected error code: ${err.code} — ${err.message}`, true);
+        }
+      }
+    } catch (err) {
+      show(out, `Test setup failed: ${err.message}`, true);
+    }
+  };
+</script>
+</body>
+</html>
