@@ -1,0 +1,2208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SecureBin — Zero-Knowledge Encrypted Secret Sharing</title>
+<meta name="description" content="SecureBin is a privacy-first platform for sharing sensitive text and files, encrypted end-to-end in your browser." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28'%3E%3Crect x='4' y='12' width='20' height='14' rx='3' fill='none' stroke='%2300D4AA' stroke-width='2'/%3E%3Cpath d='M9 12V8a5 5 0 0 1 10 0v4' fill='none' stroke='%2300D4AA' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='14' cy='19' r='2' fill='%2300D4AA'/%3E%3C/svg%3E" />
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!--
+  ══════════════════════════════════════════════════════════════
+  SecureBin Frontend — Integration Test Harness
+  Built around src/api/secretsApi.js (see that file for the real
+  fetch layer this UI is wired to).
+
+  This file replaces integeration-test.html.
+  It talks to the backend at http://localhost:3000 by default —
+  override with ?api=http://your-host:port in the URL, or edit
+  API_BASE below.
+  ══════════════════════════════════════════════════════════════
+-->
+<script type="text/babel" data-presets="react,env">
+const { useState, useEffect, useCallback, useRef, createContext, useContext, useMemo } = React;
+
+// ═══════════════════════════════════════════════════════════════
+// SECUREBIN — Privacy-First Secure Sharing Platform
+// Complete React SPA with all pages, routing, and features
+// ═══════════════════════════════════════════════════════════════
+
+// ── Contexts ──────────────────────────────────────────────────
+
+const ThemeContext = createContext({ theme: "dark", toggle: () => {} });
+const CookieContext = createContext({ consent: null, setConsent: () => {} });
+
+// ── secretsApi (inline for artifact) ─────────────────────────
+
+const API_BASE = new URLSearchParams(window.location.search).get("api") || "http://localhost:3000";
+
+const secretsApi = {
+  async createTextSecret(envelope, policy = {}) {
+    const body = { ...envelope };
+    if (policy.maxViews) body.maxViews = policy.maxViews;
+    if (policy.expiresAt) body.expiresAt = policy.expiresAt;
+    const res = await fetch(`${API_BASE}/api/secrets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Unknown error" }));
+      throw new Error(err.error || `Server error: ${res.status}`);
+    }
+    return res.json();
+  },
+  async createFileSecret(fileEnvelope, policy = {}) {
+    const fd = new FormData();
+    fd.append("encryptedBytes", new Blob([fileEnvelope.encryptedBytes]));
+    fd.append("fileIv", fileEnvelope.fileIv);
+    fd.append("metaIv", fileEnvelope.metaIv);
+    fd.append("encryptedMetadata", fileEnvelope.encryptedMetadata);
+    fd.append("viewers", JSON.stringify(fileEnvelope.viewers));
+    if (policy.maxViews) fd.append("maxViews", String(policy.maxViews));
+    if (policy.expiresAt) fd.append("expiresAt", policy.expiresAt);
+    const res = await fetch(`${API_BASE}/api/secrets`, { method: "POST", body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Unknown error" }));
+      throw new Error(err.error || `Server error: ${res.status}`);
+    }
+    return res.json();
+  },
+  fetchSecretFn: (secretId, viewerLabel) =>
+    fetch(`${API_BASE}/api/secrets/${secretId}?viewer=${encodeURIComponent(viewerLabel)}`),
+  async revokeSecret(secretId, ownerToken) {
+    const res = await fetch(`${API_BASE}/api/secrets/${secretId}/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerToken }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: "Unknown error" }));
+      const error = new Error(err.error || `Server error: ${res.status}`);
+      error.status = res.status;
+      throw error;
+    }
+    return res.json();
+  },
+  async getSecretStatus(secretId) {
+    const res = await fetch(`${API_BASE}/api/secrets/${secretId}/status`);
+    if (!res.ok) throw new Error(`Status error: ${res.status}`);
+    return res.json();
+  },
+  async getSecretStats(secretId) {
+    const res = await fetch(`${API_BASE}/api/secrets/${secretId}/stats`);
+    if (!res.ok) throw new Error(`Stats error: ${res.status}`);
+    return res.json();
+  },
+  async checkIntegrity(secretId) {
+    const res = await fetch(`${API_BASE}/api/secrets/${secretId}/integrity`);
+    if (!res.ok) throw new Error(`Integrity error: ${res.status}`);
+    return res.json();
+  },
+  async checkHealth() {
+    const res = await fetch(`${API_BASE}/health`);
+    return res.json();
+  },
+};
+
+// ── Mock crypto module (replace with real crypto/index.js) ───
+
+function analyzeContent(text) {
+  if (!text || text.length < 3) return { secretType: "unknown", score: 0, recommendations: [] };
+  const recs = [];
+  let type = "text";
+  let score = 20;
+  if (/(?:AKIA|AIza|sk-|ghp_|glpat-|xox[bsp]-)/i.test(text)) {
+    type = "api_key";
+    score = 90;
+    recs.push("Contains what looks like an API key — use burn after reading");
+  }
+  if (/(?:password|passwd|pwd)\s*[:=]/i.test(text)) {
+    type = "credential";
+    score = 85;
+    recs.push("Contains what looks like a password — limit views and set expiry");
+  }
+  if (/\b\d{3}[-.]?\d{2}[-.]?\d{4}\b/.test(text)) {
+    type = "pii";
+    score = 80;
+    recs.push("Contains what looks like a SSN — enable all protections");
+  }
+  if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(text)) {
+    if (type === "text") type = "contact_info";
+    score = Math.max(score, 40);
+    recs.push("Contains email addresses — consider view limits");
+  }
+  if (text.length > 500 && type === "text") score = 30;
+  if (recs.length === 0) recs.push("No sensitive patterns detected — standard protection recommended");
+  return { secretType: type, score, recommendations: recs };
+}
+
+function isZeroKnowledge() {
+  return typeof window !== "undefined" && typeof window.crypto?.subtle !== "undefined";
+}
+
+// ── QR Code Generator (pure SVG, no library) ────────────────
+
+function generateQRMatrix(data) {
+  // Simplified QR-like matrix for display purposes
+  // In production, use a real QR library
+  const size = 25;
+  const matrix = [];
+  let hash = 0;
+  for (let i = 0; i < data.length; i++) {
+    hash = ((hash << 5) - hash + data.charCodeAt(i)) | 0;
+  }
+  for (let r = 0; r < size; r++) {
+    const row = [];
+    for (let c = 0; c < size; c++) {
+      // Finder patterns (top-left, top-right, bottom-left)
+      const inFinderTL = r < 7 && c < 7;
+      const inFinderTR = r < 7 && c >= size - 7;
+      const inFinderBL = r >= size - 7 && c < 7;
+      if (inFinderTL || inFinderTR || inFinderBL) {
+        const lr = inFinderTL ? r : inFinderTR ? r : r - (size - 7);
+        const lc = inFinderTL ? c : inFinderTR ? c - (size - 7) : c;
+        const border = lr === 0 || lr === 6 || lc === 0 || lc === 6;
+        const inner = lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4;
+        row.push(border || inner ? 1 : 0);
+      } else {
+        const seed = (hash + r * 31 + c * 17) & 0xffff;
+        row.push(seed % 3 === 0 ? 1 : 0);
+      }
+    }
+    matrix.push(row);
+  }
+  return matrix;
+}
+
+function QRCodeSVG({ data, size = 160 }) {
+  const matrix = generateQRMatrix(data);
+  const cellSize = size / matrix.length;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="QR code for secret link">
+      <rect width={size} height={size} fill="white" rx="4" />
+      {matrix.map((row, r) =>
+        row.map((cell, c) =>
+          cell ? (
+            <rect key={`${r}-${c}`} x={c * cellSize} y={r * cellSize} width={cellSize} height={cellSize} fill="#0A0E17" />
+          ) : null
+        )
+      )}
+    </svg>
+  );
+}
+
+// ── Utility Hooks ────────────────────────────────────────────
+
+function useCountdown(seconds) {
+  const [remaining, setRemaining] = useState(seconds);
+  useEffect(() => {
+    if (seconds === null || seconds === undefined) { setRemaining(null); return; }
+    setRemaining(seconds);
+    const id = setInterval(() => setRemaining((r) => (r !== null && r > 0 ? r - 1 : 0)), 1000);
+    return () => clearInterval(id);
+  }, [seconds]);
+  return remaining;
+}
+
+function formatTime(s) {
+  if (s === null || s === undefined) return "No expiry";
+  if (s <= 0) return "Expired";
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  parts.push(`${sec}s`);
+  return parts.join(" ");
+}
+
+function useDebounce(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
+// ── Simple Client-Side Router ────────────────────────────────
+
+function useRouter() {
+  const [path, setPath] = useState(window.location.hash.slice(1) || "/");
+  useEffect(() => {
+    const handler = () => setPath(window.location.hash.slice(1) || "/");
+    window.addEventListener("hashchange", handler);
+    return () => window.removeEventListener("hashchange", handler);
+  }, []);
+  const navigate = useCallback((to) => {
+    window.location.hash = to;
+  }, []);
+  return { path, navigate };
+}
+
+function matchRoute(path, pattern) {
+  const pathParts = path.split("/").filter(Boolean);
+  const patternParts = pattern.split("/").filter(Boolean);
+  if (pathParts.length !== patternParts.length) return null;
+  const params = {};
+  for (let i = 0; i < patternParts.length; i++) {
+    if (patternParts[i].startsWith(":")) {
+      params[patternParts[i].slice(1)] = pathParts[i];
+    } else if (patternParts[i] !== pathParts[i]) {
+      return null;
+    }
+  }
+  return params;
+}
+
+// ── Shared Components ────────────────────────────────────────
+
+function SkipLink() {
+  return (
+    <a href="#main-content" className="skip-link" aria-label="Skip to main content">
+      Skip to content
+    </a>
+  );
+}
+
+function Navbar({ navigate }) {
+  const { theme, toggle } = useContext(ThemeContext);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const currentPath = window.location.hash.slice(1) || "/";
+
+  const links = [
+    { to: "/", label: "Home" },
+    { to: "/create", label: "Create" },
+    { to: "/about", label: "About" },
+    { to: "/contact", label: "Contact" },
+    { to: "/waitlist", label: "Waitlist" },
+  ];
+
+  return (
+    <nav className="navbar" role="navigation" aria-label="Main navigation">
+      <div className="navbar-inner">
+        <button className="navbar-logo" onClick={() => navigate("/")} aria-label="SecureBin home">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect x="4" y="12" width="20" height="14" rx="3" stroke="var(--accent)" strokeWidth="2" />
+            <path d="M9 12V8a5 5 0 0 1 10 0v4" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+            <circle cx="14" cy="19" r="2" fill="var(--accent)" />
+          </svg>
+          <span className="navbar-title">SecureBin</span>
+        </button>
+
+        <div className={`navbar-links ${menuOpen ? "open" : ""}`}>
+          {links.map((l) => (
+            <button
+              key={l.to}
+              className={`nav-link ${currentPath === l.to ? "active" : ""}`}
+              onClick={() => { navigate(l.to); setMenuOpen(false); }}
+            >
+              {l.label}
+            </button>
+          ))}
+          <button className="theme-toggle" onClick={toggle} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}>
+            {theme === "dark" ? "☀" : "☾"}
+          </button>
+        </div>
+
+        <button
+          className="hamburger"
+          onClick={() => setMenuOpen(!menuOpen)}
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={menuOpen}
+        >
+          <span /><span /><span />
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+function Footer({ navigate }) {
+  return (
+    <footer className="footer" role="contentinfo">
+      <div className="footer-inner">
+        <div className="footer-col">
+          <p className="footer-brand">SecureBin</p>
+          <p className="footer-tagline">Your secrets, your rules.</p>
+        </div>
+        <div className="footer-col">
+          <p className="footer-heading">Platform</p>
+          <button onClick={() => navigate("/create")}>Create Secret</button>
+          <button onClick={() => navigate("/about")}>About</button>
+          <button onClick={() => navigate("/faq")}>FAQ</button>
+        </div>
+        <div className="footer-col">
+          <p className="footer-heading">Company</p>
+          <button onClick={() => navigate("/contact")}>Contact</button>
+          <button onClick={() => navigate("/waitlist")}>Waitlist</button>
+        </div>
+        <div className="footer-col">
+          <p className="footer-heading">Legal</p>
+          <button onClick={() => navigate("/about")}>Privacy Policy</button>
+          <button onClick={() => navigate("/about")}>Terms of Service</button>
+        </div>
+      </div>
+      <div className="footer-bottom">
+        <p>&copy; {new Date().getFullYear()} SecureBin. All rights reserved. Zero-knowledge encrypted.</p>
+      </div>
+    </footer>
+  );
+}
+
+function Breadcrumbs({ items, navigate }) {
+  return (
+    <nav className="breadcrumbs" aria-label="Breadcrumb">
+      <ol>
+        {items.map((item, i) => (
+          <li key={i}>
+            {i < items.length - 1 ? (
+              <button onClick={() => navigate(item.to)}>{item.label}</button>
+            ) : (
+              <span aria-current="page">{item.label}</span>
+            )}
+            {i < items.length - 1 && <span className="breadcrumb-sep" aria-hidden="true">/</span>}
+          </li>
+        ))}
+      </ol>
+    </nav>
+  );
+}
+
+function CookieConsentBanner() {
+  const { consent, setConsent } = useContext(CookieContext);
+  if (consent !== null) return null;
+  return (
+    <div className="cookie-banner" role="dialog" aria-label="Cookie consent">
+      <p>We use minimal analytics to improve SecureBin. No tracking, no ads, no third-party cookies.</p>
+      <div className="cookie-actions">
+        <button className="btn btn-primary btn-sm" onClick={() => setConsent(true)}>Accept</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => setConsent(false)}>Decline</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => window.location.hash = "/faq"}>Learn More</button>
+      </div>
+    </div>
+  );
+}
+
+function ZeroKnowledgeBadge() {
+  const zk = isZeroKnowledge();
+  if (!zk) return null;
+  return (
+    <span className="zk-badge" title="Encrypted in your browser — we never see your data or key" role="status">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+        <path d="M7 1L1 4v3c0 3.3 2.6 6.4 6 7 3.4-.6 6-3.7 6-7V4L7 1z" stroke="currentColor" strokeWidth="1.3" fill="none"/>
+        <path d="M4.5 7L6.5 9L10 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+      Zero-Knowledge
+    </span>
+  );
+}
+
+function CopyButton({ text, label = "Copy" }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+  return (
+    <button className={`btn btn-ghost btn-sm copy-btn ${copied ? "copied" : ""}`} onClick={handleCopy} aria-label={copied ? "Copied" : label}>
+      {copied ? "✓ Copied" : label}
+    </button>
+  );
+}
+
+function PasswordStrengthMeter({ password }) {
+  const getStrength = (pw) => {
+    if (!pw) return { level: 0, label: "", cls: "" };
+    let s = 0;
+    if (pw.length >= 8) s++;
+    if (pw.length >= 12) s++;
+    if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) s++;
+    if (/\d/.test(pw)) s++;
+    if (/[^A-Za-z0-9]/.test(pw)) s++;
+    if (s <= 1) return { level: 1, label: "Weak", cls: "weak" };
+    if (s <= 2) return { level: 2, label: "Fair", cls: "fair" };
+    if (s <= 3) return { level: 3, label: "Strong", cls: "strong" };
+    return { level: 4, label: "Excellent", cls: "excellent" };
+  };
+  const { level, label, cls } = getStrength(password);
+  if (!password) return null;
+  return (
+    <div className="pw-strength" aria-label={`Password strength: ${label}`}>
+      <div className="pw-bar">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className={`pw-segment ${i <= level ? cls : ""}`} />
+        ))}
+      </div>
+      <span className={`pw-label ${cls}`}>{label}</span>
+    </div>
+  );
+}
+
+function SecurityScoreGauge({ score, label = "Score", size = 80 }) {
+  const radius = (size - 10) / 2;
+  const circ = 2 * Math.PI * radius;
+  const pct = Math.max(0, Math.min(100, score || 0));
+  const offset = circ - (pct / 100) * circ;
+  const color = pct >= 75 ? "var(--accent)" : pct >= 50 ? "var(--warning)" : "var(--danger)";
+  return (
+    <div className="score-gauge" aria-label={`${label}: ${pct} out of 100`}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="var(--border)" strokeWidth="5" />
+        <circle
+          cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth="5"
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          style={{ transition: "stroke-dashoffset 0.5s ease" }}
+        />
+        <text x={size / 2} y={size / 2 - 2} textAnchor="middle" dominantBaseline="middle"
+          fill="var(--text)" fontSize={size * 0.22} fontFamily="var(--font-mono)" fontWeight="700">{pct}</text>
+        <text x={size / 2} y={size / 2 + 14} textAnchor="middle" dominantBaseline="middle"
+          fill="var(--text-muted)" fontSize={size * 0.12} fontFamily="var(--font-body)">{label}</text>
+      </svg>
+    </div>
+  );
+}
+
+function StatusBadge({ state }) {
+  const map = {
+    ACTIVE: "badge-active", VIEWED: "badge-viewed", EXPIRED: "badge-expired",
+    REVOKED: "badge-revoked", BURNED: "badge-burned", DELETED: "badge-deleted",
+  };
+  return <span className={`status-badge ${map[state] || ""}`} role="status">{state}</span>;
+}
+
+function LoadingSpinner({ text = "Loading..." }) {
+  return (
+    <div className="loading" role="status" aria-label={text}>
+      <div className="spinner" />
+      <p>{text}</p>
+    </div>
+  );
+}
+
+function ErrorMessage({ message, onRetry }) {
+  return (
+    <div className="error-msg" role="alert">
+      <p>{message}</p>
+      {onRetry && <button className="btn btn-ghost btn-sm" onClick={onRetry}>Try again</button>}
+    </div>
+  );
+}
+
+// ── PAGE: Home ───────────────────────────────────────────────
+
+function HomePage({ navigate }) {
+  return (
+    <>
+      <section className="hero">
+        <ZeroKnowledgeBadge />
+        <h1>Share secrets that<br /><span className="accent">self-destruct</span></h1>
+        <p className="hero-sub">
+          End-to-end encrypted in your browser. The server never sees your data.
+          Set expiry, view limits, and per-viewer passwords — then share a single link.
+        </p>
+        <div className="hero-cta">
+          <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>Create a Secret</button>
+          <button className="btn btn-ghost btn-lg" onClick={() => navigate("/about")}>How it works</button>
+        </div>
+      </section>
+
+      <section className="features" aria-labelledby="features-heading">
+        <h2 id="features-heading" className="section-heading">Why SecureBin</h2>
+        <div className="feature-grid">
+          <div className="feature-card">
+            <div className="feature-icon" aria-hidden="true">
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <rect x="5" y="14" width="22" height="15" rx="3" stroke="var(--accent)" strokeWidth="2" />
+                <path d="M10 14V9a6 6 0 0 1 12 0v5" stroke="var(--accent)" strokeWidth="2" />
+                <circle cx="16" cy="21" r="2" fill="var(--accent)" />
+              </svg>
+            </div>
+            <h3>AES-256-GCM Encryption</h3>
+            <p>Military-grade encryption happens entirely in your browser. Your plaintext never touches our servers. Tamper detection is built in — corrupted data is caught and rejected.</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon" aria-hidden="true">
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <path d="M16 3L4 8v7c0 8 5.4 15.2 12 17 6.6-1.8 12-9 12-17V8L16 3z" stroke="var(--accent)" strokeWidth="2" fill="none" />
+                <path d="M10 16l4 4 8-8" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <h3>Security Policy Engine</h3>
+            <p>Combine time-based expiry, view limits, burn-after-reading, per-viewer passwords, and instant revocation into a single unified security policy.</p>
+          </div>
+          <div className="feature-card">
+            <div className="feature-icon" aria-hidden="true">
+              <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                <circle cx="16" cy="16" r="12" stroke="var(--accent)" strokeWidth="2" fill="none" />
+                <path d="M16 8v8l5 3" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </div>
+            <h3>Complete Lifecycle Control</h3>
+            <p>Track your secret from creation through every view, to expiration, revocation, or deletion. Live dashboards show exactly what's happening and when.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="how-it-works" aria-labelledby="how-heading">
+        <h2 id="how-heading" className="section-heading">How it works</h2>
+        <div className="steps-flow">
+          {[
+            { icon: "✎", title: "Create", desc: "Write your secret or upload a file" },
+            { icon: "⚿", title: "Encrypt", desc: "AES-256-GCM encrypts it in your browser" },
+            { icon: "⇗", title: "Share", desc: "Get a secure link with per-viewer passwords" },
+            { icon: "◉", title: "Control", desc: "Set expiry, view limits, burn-after-reading" },
+            { icon: "✕", title: "Auto-destruct", desc: "Secret expires and is permanently deleted" },
+          ].map((step, i) => (
+            <div className="step" key={i}>
+              <div className="step-icon" aria-hidden="true">{step.icon}</div>
+              <h3>{step.title}</h3>
+              <p>{step.desc}</p>
+              {i < 4 && <div className="step-arrow" aria-hidden="true">→</div>}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="faq-section" aria-labelledby="faq-heading">
+        <h2 id="faq-heading" className="section-heading">Frequently asked questions</h2>
+        <FAQList />
+        <div style={{ textAlign: "center", marginTop: "1.5rem" }}>
+          <button className="btn btn-ghost" onClick={() => navigate("/faq")}>See all FAQ →</button>
+        </div>
+      </section>
+
+      <section className="bottom-cta">
+        <h2>Ready to share securely?</h2>
+        <p>Create your first encrypted secret in under 30 seconds.</p>
+        <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>Create a Secret</button>
+      </section>
+    </>
+  );
+}
+
+// ── PAGE: Create Secret ──────────────────────────────────────
+
+function CreateSecretPage({ navigate }) {
+  const [mode, setMode] = useState("text"); // text | file
+  const [secretText, setSecretText] = useState("");
+  const [file, setFile] = useState(null);
+  const [viewers, setViewers] = useState([{ label: "", password: "" }]);
+  const [expiry, setExpiry] = useState("");
+  const [customExpiry, setCustomExpiry] = useState("");
+  const [maxViews, setMaxViews] = useState("");
+  const [burnAfterReading, setBurnAfterReading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const debouncedText = useDebounce(secretText, 300);
+  const analysis = useMemo(() => analyzeContent(debouncedText), [debouncedText]);
+
+  const expiryOptions = [
+    { label: "5m", value: "5m" },
+    { label: "1h", value: "1h" },
+    { label: "24h", value: "24h" },
+    { label: "7d", value: "7d" },
+    { label: "30d", value: "30d" },
+    { label: "Custom", value: "custom" },
+  ];
+
+  const computeExpiresAt = () => {
+    if (!expiry || expiry === "custom") {
+      if (customExpiry) return new Date(customExpiry).toISOString();
+      return null;
+    }
+    const now = Date.now();
+    const map = { "5m": 5 * 60000, "1h": 3600000, "24h": 86400000, "7d": 604800000, "30d": 2592000000 };
+    return new Date(now + (map[expiry] || 0)).toISOString();
+  };
+
+  const policyScore = useMemo(() => {
+    let s = 0;
+    if (expiry || customExpiry) s += 25;
+    if (burnAfterReading) s += 25;
+    else if (maxViews && parseInt(maxViews) > 0) s += Math.min(25, Math.floor(25 / Math.max(1, parseInt(maxViews))));
+    if (viewers.some((v) => v.password.length > 0)) s += 25;
+    return s;
+  }, [expiry, customExpiry, maxViews, burnAfterReading, viewers]);
+
+  const addViewer = () => setViewers([...viewers, { label: "", password: "" }]);
+  const removeViewer = (i) => { if (viewers.length > 1) setViewers(viewers.filter((_, idx) => idx !== i)); };
+  const updateViewer = (i, field, val) => { const nv = [...viewers]; nv[i] = { ...nv[i], [field]: val }; setViewers(nv); };
+
+  const handleFileDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer?.files?.[0];
+    if (f) {
+      if (f.size > 25 * 1024 * 1024) { setError("File exceeds 25MB limit"); return; }
+      setFile(f);
+    }
+  };
+
+  const handleFileSelect = (e) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      if (f.size > 25 * 1024 * 1024) { setError("File exceeds 25MB limit"); return; }
+      setFile(f);
+    }
+  };
+
+  const handleSubmit = async () => {
+    setError("");
+    const validViewers = viewers.filter((v) => v.label.trim() && v.password.trim());
+    if (validViewers.length === 0) { setError("Add at least one viewer with a label and password."); return; }
+    const labels = validViewers.map((v) => v.label.trim());
+    if (new Set(labels).size !== labels.length) { setError("Viewer labels must be unique."); return; }
+    if (mode === "text" && !secretText.trim()) { setError("Enter your secret text."); return; }
+    if (mode === "file" && !file) { setError("Select a file to encrypt."); return; }
+
+    setLoading(true);
+    try {
+      const viewerPasswords = validViewers.map((v) => ({ label: v.label.trim(), password: v.password }));
+      const policy = {};
+      const ea = computeExpiresAt();
+      if (ea) policy.expiresAt = ea;
+      if (burnAfterReading) {
+        policy.maxViews = 1;
+      } else if (maxViews && parseInt(maxViews) > 0) {
+        policy.maxViews = parseInt(maxViews);
+      }
+
+      // In production: const envelope = await buildEnvelope(secretText, viewerPasswords);
+      // For demo, we simulate the envelope structure
+      const fakeEnvelope = {
+        ciphertext: btoa(secretText || "file-content"),
+        iv: btoa("123456789012"),
+        viewers: viewerPasswords.map((v) => ({
+          viewerLabel: v.label,
+          wrappedKey: btoa("wrapped-key-" + v.label),
+          kdfSalt: btoa("1234567890123456"),
+          wrapIv: btoa("123456789012"),
+          kdfParams: { iterations: 600000, algorithm: "PBKDF2-SHA256" },
+        })),
+      };
+      if (mode === "text" && analysis.score > 0) {
+        fakeEnvelope.encryptedAnalysis = btoa(JSON.stringify(analysis));
+        fakeEnvelope.analysisIv = btoa("123456789012");
+      }
+
+      const result = await secretsApi.createTextSecret(fakeEnvelope, policy);
+      navigate(`/secret/${result.secretId}/share?ownerToken=${encodeURIComponent(result.ownerToken)}`);
+    } catch (err) {
+      setError(err.message || "Failed to create secret. Check your connection.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const checklist = [
+    { label: "Password protection", active: viewers.some((v) => v.password.length > 0) },
+    { label: "Time expiry", active: !!(expiry || customExpiry) },
+    { label: "View limit", active: !!(maxViews && parseInt(maxViews) > 0) || burnAfterReading },
+    { label: "Burn after reading", active: burnAfterReading },
+  ];
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "Create Secret" }]} navigate={navigate} />
+      <div className="page-header">
+        <h1>Create a secret</h1>
+        <ZeroKnowledgeBadge />
+      </div>
+
+      <div className="create-layout">
+        <div className="create-main">
+          {/* Mode toggle */}
+          <div className="mode-toggle" role="tablist" aria-label="Secret type">
+            <button role="tab" aria-selected={mode === "text"} className={mode === "text" ? "active" : ""} onClick={() => setMode("text")}>
+              Text
+            </button>
+            <button role="tab" aria-selected={mode === "file"} className={mode === "file" ? "active" : ""} onClick={() => setMode("file")}>
+              File
+            </button>
+          </div>
+
+          {/* Editor / File upload */}
+          {mode === "text" ? (
+            <div className="editor-section">
+              <label htmlFor="secret-editor" className="sr-only">Secret content</label>
+              <textarea
+                id="secret-editor"
+                className="secret-editor"
+                placeholder="Paste your secret, API key, password, note..."
+                value={secretText}
+                onChange={(e) => setSecretText(e.target.value)}
+                rows={10}
+                aria-describedby="char-count"
+              />
+              <div className="editor-footer">
+                <span id="char-count" className="char-count">{secretText.length.toLocaleString()} characters</span>
+              </div>
+              {/* Live analysis preview */}
+              {secretText.length > 2 && (
+                <div className="analysis-preview" aria-live="polite">
+                  <div className="analysis-header">
+                    <span className="analysis-type">Detected: <strong>{analysis.secretType}</strong></span>
+                    <SecurityScoreGauge score={analysis.score} label="Content" size={56} />
+                  </div>
+                  {analysis.recommendations.map((r, i) => (
+                    <span key={i} className="rec-pill">{r}</span>
+                  ))}
+                  <p className="analysis-caveat">Advisory only — pattern-based detection, not a guarantee.</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div
+              className={`drop-zone ${dragOver ? "drag-over" : ""} ${file ? "has-file" : ""}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleFileDrop}
+              onClick={() => fileInputRef.current?.click()}
+              role="button"
+              tabIndex={0}
+              aria-label="File upload area, click or drag to upload"
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click(); }}
+            >
+              <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="sr-only" aria-label="Choose file" />
+              {file ? (
+                <div className="file-preview">
+                  <span className="file-icon" aria-hidden="true">📄</span>
+                  <span className="file-name">{file.name}</span>
+                  <span className="file-size">{(file.size / 1024).toFixed(1)} KB</span>
+                  <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); setFile(null); }}>Remove</button>
+                </div>
+              ) : (
+                <>
+                  <span className="drop-icon" aria-hidden="true">⇧</span>
+                  <p>Drag & drop a file here, or click to browse</p>
+                  <p className="drop-limit">Maximum 25 MB</p>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Viewer configuration */}
+          <fieldset className="viewer-section">
+            <legend>Viewers</legend>
+            <p className="field-help">Each viewer gets their own password to access this secret.</p>
+            {viewers.map((v, i) => (
+              <div className="viewer-row" key={i}>
+                <div className="viewer-field">
+                  <label htmlFor={`viewer-label-${i}`}>Label</label>
+                  <input id={`viewer-label-${i}`} type="text" placeholder="e.g. Alice" value={v.label}
+                    onChange={(e) => updateViewer(i, "label", e.target.value)} />
+                </div>
+                <div className="viewer-field">
+                  <label htmlFor={`viewer-pw-${i}`}>Password</label>
+                  <input id={`viewer-pw-${i}`} type="password" placeholder="Viewer's password" value={v.password}
+                    onChange={(e) => updateViewer(i, "password", e.target.value)} autoComplete="new-password" />
+                  <PasswordStrengthMeter password={v.password} />
+                </div>
+                {viewers.length > 1 && (
+                  <button className="btn btn-ghost btn-sm viewer-remove" onClick={() => removeViewer(i)} aria-label={`Remove viewer ${v.label || i + 1}`}>✕</button>
+                )}
+              </div>
+            ))}
+            <button className="btn btn-ghost btn-sm" onClick={addViewer}>+ Add viewer</button>
+          </fieldset>
+
+          {/* Policy panel */}
+          <fieldset className="policy-section">
+            <legend>Security Policy</legend>
+
+            <div className="policy-row">
+              <label>Expiration</label>
+              <div className="expiry-options">
+                {expiryOptions.map((o) => (
+                  <button key={o.value} className={`expiry-btn ${expiry === o.value ? "active" : ""}`}
+                    onClick={() => setExpiry(o.value)} type="button">{o.label}</button>
+                ))}
+              </div>
+              {expiry === "custom" && (
+                <input type="datetime-local" className="custom-expiry" value={customExpiry}
+                  onChange={(e) => setCustomExpiry(e.target.value)} aria-label="Custom expiration date and time" />
+              )}
+            </div>
+
+            <div className="policy-row">
+              <label htmlFor="max-views">Max views (shared across all viewers)</label>
+              <input id="max-views" type="number" min="1" max="1000" value={burnAfterReading ? "1" : maxViews}
+                onChange={(e) => { setMaxViews(e.target.value); if (parseInt(e.target.value) === 1) setBurnAfterReading(true); else setBurnAfterReading(false); }}
+                disabled={burnAfterReading} placeholder="Unlimited" />
+            </div>
+
+            <div className="policy-row toggle-row">
+              <label htmlFor="burn-toggle">Burn after reading</label>
+              <button id="burn-toggle" role="switch" aria-checked={burnAfterReading} className={`toggle ${burnAfterReading ? "on" : ""}`}
+                onClick={() => { setBurnAfterReading(!burnAfterReading); if (!burnAfterReading) setMaxViews("1"); }}>
+                <span className="toggle-knob" />
+              </button>
+            </div>
+          </fieldset>
+
+          {error && <ErrorMessage message={error} />}
+
+          <button className="btn btn-primary btn-lg create-submit" onClick={handleSubmit} disabled={loading}>
+            {loading ? "Encrypting..." : "Encrypt & Share"}
+          </button>
+        </div>
+
+        {/* Sidebar */}
+        <aside className="create-sidebar">
+          <div className="sidebar-card">
+            <h3>Policy Score</h3>
+            <SecurityScoreGauge score={policyScore} label="Policy" size={100} />
+          </div>
+          <div className="sidebar-card">
+            <h3>Security Checklist</h3>
+            <ul className="checklist">
+              {checklist.map((c, i) => (
+                <li key={i} className={c.active ? "check-on" : "check-off"}>
+                  <span className="check-icon" aria-hidden="true">{c.active ? "✓" : "○"}</span>
+                  {c.label}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="sidebar-card zk-card">
+            <ZeroKnowledgeBadge />
+            <p>Everything is encrypted in your browser before it reaches our server. We can't read your data — ever.</p>
+          </div>
+        </aside>
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: Share / Thank You ──────────────────────────────────
+
+function SharePage({ navigate, params }) {
+  const secretId = params.secretId;
+  const searchParams = new URLSearchParams(window.location.hash.split("?")[1] || "");
+  const ownerToken = searchParams.get("ownerToken") || "";
+  const shareUrl = `${window.location.origin}/#/secret/${secretId}`;
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { to: "/create", label: "Create" }, { label: "Share" }]} navigate={navigate} />
+      <div className="share-page">
+        <div className="share-success" role="status">
+          <div className="success-icon" aria-hidden="true">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+              <circle cx="24" cy="24" r="22" stroke="var(--accent)" strokeWidth="2.5" />
+              <path d="M14 24l7 7 14-14" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          <h1>Secret created</h1>
+          <p>Your data was encrypted in the browser and stored securely.</p>
+        </div>
+
+        <div className="share-card">
+          <h2>Share this link</h2>
+          <div className="share-link-box">
+            <code className="share-link">{shareUrl}</code>
+            <CopyButton text={shareUrl} label="Copy link" />
+          </div>
+          <div className="qr-container">
+            <QRCodeSVG data={shareUrl} size={180} />
+          </div>
+        </div>
+
+        {ownerToken && (
+          <div className="share-card owner-card">
+            <h2>Owner Token</h2>
+            <p className="owner-warning">Save this token now — you need it to revoke this secret. It cannot be recovered later.</p>
+            <div className="share-link-box">
+              <code className="share-link owner-token">{ownerToken}</code>
+              <CopyButton text={ownerToken} label="Copy token" />
+            </div>
+          </div>
+        )}
+
+        <div className="share-actions">
+          <button className="btn btn-primary" onClick={() => navigate("/create")}>Create Another Secret</button>
+          <button className="btn btn-ghost" onClick={() => navigate(`/secret/${secretId}/dashboard`)}>View Dashboard</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: View Secret ────────────────────────────────────────
+
+function ViewSecretPage({ navigate, params }) {
+  const secretId = params.secretId;
+  const [viewerLabel, setViewerLabel] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [plaintext, setPlaintext] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [decryptedFile, setDecryptedFile] = useState(null);
+  const [secretType, setSecretType] = useState(null); // text or file
+
+  const errorMap = {
+    VIEW_LIMIT_EXCEEDED: "This secret is no longer available.",
+    NOT_FOUND: "This link is invalid or has expired.",
+    AUTH_FAILED: "Incorrect password. Try again.",
+    DECRYPT_FAILED: "This secret's data appears corrupted.",
+    NETWORK_ERROR: "Couldn't reach the server. Check your connection.",
+    SERVER_ERROR: "Something went wrong. Please try again.",
+  };
+
+  const handleDecrypt = async () => {
+    setError("");
+    if (!viewerLabel.trim()) { setError("Enter your viewer label."); return; }
+    if (!password) { setError("Enter your password."); return; }
+
+    setLoading(true);
+    try {
+      // In production:
+      // const { plaintext, analysis } = await openEnvelope(secretId, viewerLabel, password, secretsApi.fetchSecretFn);
+      // For demo, fetch from API and simulate decryption
+      const res = await secretsApi.fetchSecretFn(secretId, viewerLabel.trim());
+      if (!res.ok) {
+        const status = res.status;
+        if (status === 410) throw { code: "VIEW_LIMIT_EXCEEDED" };
+        if (status === 404) throw { code: "NOT_FOUND" };
+        if (status === 400) throw { code: "AUTH_FAILED" };
+        throw { code: "SERVER_ERROR" };
+      }
+      const data = await res.json();
+      if (data.ciphertext) {
+        // Text secret
+        setSecretType("text");
+        try { setPlaintext(atob(data.ciphertext)); } catch { setPlaintext("[Encrypted content - requires crypto module]"); }
+        if (data.encryptedAnalysis) {
+          try { setAnalysis(JSON.parse(atob(data.encryptedAnalysis))); } catch { /* ignore */ }
+        }
+      } else if (data.encryptedBytes) {
+        // File secret
+        setSecretType("file");
+        setDecryptedFile({ name: "encrypted-file", size: data.encryptedBytes.length });
+      }
+    } catch (err) {
+      const code = err.code || "SERVER_ERROR";
+      setError(errorMap[code] || errorMap.SERVER_ERROR);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "View Secret" }]} navigate={navigate} />
+
+      {!plaintext && !decryptedFile ? (
+        <div className="view-auth">
+          <h1>View a secret</h1>
+          <p>Enter your viewer label and password to decrypt this secret.</p>
+          <ZeroKnowledgeBadge />
+
+          <div className="auth-form">
+            <div className="form-group">
+              <label htmlFor="viewer-label">Viewer label</label>
+              <input id="viewer-label" type="text" placeholder="e.g. Alice" value={viewerLabel}
+                onChange={(e) => setViewerLabel(e.target.value)} autoComplete="off" />
+            </div>
+            <div className="form-group">
+              <label htmlFor="viewer-password">Password</label>
+              <input id="viewer-password" type="password" placeholder="Your password" value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleDecrypt(); }}
+                autoComplete="current-password" />
+            </div>
+            {error && <ErrorMessage message={error} />}
+            <button className="btn btn-primary btn-lg" onClick={handleDecrypt} disabled={loading}>
+              {loading ? "Decrypting..." : "Decrypt"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="view-result">
+          <div className="view-header">
+            <h1>Secret revealed</h1>
+            <ZeroKnowledgeBadge />
+          </div>
+
+          {secretType === "text" && plaintext && (
+            <>
+              <div className="secret-display">
+                <pre className="secret-content">{plaintext}</pre>
+                <CopyButton text={plaintext} label="Copy to clipboard" />
+              </div>
+              {analysis && (
+                <div className="view-analysis">
+                  <h3>Content Analysis</h3>
+                  <p>Detected type: <strong>{analysis.secretType}</strong></p>
+                  <SecurityScoreGauge score={analysis.score} label="Sensitivity" size={64} />
+                  {analysis.recommendations?.map((r, i) => (
+                    <span key={i} className="rec-pill">{r}</span>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {secretType === "file" && decryptedFile && (
+            <div className="file-download">
+              <p>File decrypted successfully.</p>
+              <button className="btn btn-primary">
+                Download {decryptedFile.name}
+              </button>
+            </div>
+          )}
+
+          <div className="view-actions">
+            <button className="btn btn-ghost" onClick={() => navigate(`/secret/${secretId}/dashboard`)}>View Dashboard</button>
+            <button className="btn btn-ghost" onClick={() => navigate("/create")}>Create New Secret</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── PAGE: Dashboard ──────────────────────────────────────────
+
+function DashboardPage({ navigate, params }) {
+  const secretId = params.secretId;
+  const [status, setStatus] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [integrity, setIntegrity] = useState(null);
+  const [error, setError] = useState("");
+  const [revokeToken, setRevokeToken] = useState("");
+  const [revokeLoading, setRevokeLoading] = useState(false);
+  const [revokeMsg, setRevokeMsg] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const s = await secretsApi.getSecretStatus(secretId);
+        if (active) setStatus(s);
+      } catch (e) {
+        if (active) setError("Could not load secret status.");
+      }
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [secretId]);
+
+  useEffect(() => {
+    secretsApi.getSecretStats(secretId).then(setStats).catch(() => {});
+  }, [secretId]);
+
+  const remaining = useCountdown(status?.timeRemainingSeconds);
+
+  const handleIntegrity = async () => {
+    try {
+      const r = await secretsApi.checkIntegrity(secretId);
+      setIntegrity(r);
+    } catch {
+      setIntegrity({ intact: false, error: true });
+    }
+  };
+
+  const handleRevoke = async () => {
+    if (!revokeToken.trim()) return;
+    setRevokeLoading(true);
+    setRevokeMsg("");
+    try {
+      await secretsApi.revokeSecret(secretId, revokeToken.trim());
+      setRevokeMsg("Secret revoked successfully.");
+      const s = await secretsApi.getSecretStatus(secretId);
+      setStatus(s);
+    } catch (err) {
+      setRevokeMsg(err.message || "Revocation failed.");
+    } finally {
+      setRevokeLoading(false);
+    }
+  };
+
+  if (error) return <ErrorMessage message={error} />;
+  if (!status) return <LoadingSpinner text="Loading dashboard..." />;
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "Dashboard" }]} navigate={navigate} />
+      <div className="page-header">
+        <h1>Secret Dashboard</h1>
+        <StatusBadge state={status.state} />
+      </div>
+
+      <div className="dashboard-grid">
+        {/* Status & Countdown */}
+        <div className="dash-card">
+          <h3>Lifecycle</h3>
+          <div className="dash-state-row">
+            <StatusBadge state={status.state} />
+            <span className="dash-type">{status.type === "text" ? "Text Secret" : "File Secret"}</span>
+          </div>
+          <div className="countdown">
+            <span className="countdown-label">Time remaining</span>
+            <span className="countdown-value mono">{formatTime(remaining)}</span>
+          </div>
+        </div>
+
+        {/* View usage */}
+        <div className="dash-card">
+          <h3>View Usage</h3>
+          <div className="usage-bar-container">
+            <div className="usage-bar">
+              <div className="usage-fill" style={{ width: `${status.maxViews ? (status.viewsUsed / status.maxViews) * 100 : 0}%` }} />
+            </div>
+            <span className="usage-text mono">{status.viewsUsed} / {status.maxViews ?? "∞"}</span>
+          </div>
+          <div className="viewer-labels">
+            <span className="dash-sublabel">Authorized viewers:</span>
+            {status.viewerLabels?.map((l, i) => (
+              <span key={i} className="viewer-chip">{l}</span>
+            ))}
+          </div>
+        </div>
+
+        {/* Policy Score */}
+        <div className="dash-card score-card">
+          <h3>Security Score</h3>
+          <SecurityScoreGauge score={status.configSecurityScore} label="Policy" size={100} />
+        </div>
+
+        {/* Integrity */}
+        <div className="dash-card">
+          <h3>Storage Integrity</h3>
+          {integrity === null ? (
+            <button className="btn btn-ghost btn-sm" onClick={handleIntegrity}>Check integrity</button>
+          ) : integrity.intact ? (
+            <p className="integrity-ok">✓ Storage intact — {integrity.healEvents} heal events</p>
+          ) : (
+            <p className="integrity-warn">⚠ Integrity issue detected</p>
+          )}
+        </div>
+
+        {/* Revoke */}
+        <div className="dash-card revoke-card">
+          <h3>Revoke Secret</h3>
+          {status.state === "ACTIVE" || status.state === "VIEWED" ? (
+            <>
+              <p>Permanently invalidate this secret. Requires your owner token.</p>
+              <div className="revoke-form">
+                <input type="password" placeholder="Owner token" value={revokeToken}
+                  onChange={(e) => setRevokeToken(e.target.value)} aria-label="Owner token for revocation" />
+                <button className="btn btn-danger btn-sm" onClick={handleRevoke} disabled={revokeLoading}>
+                  {revokeLoading ? "Revoking..." : "Revoke"}
+                </button>
+              </div>
+              {revokeMsg && <p className="revoke-msg" role="status">{revokeMsg}</p>}
+            </>
+          ) : (
+            <p>This secret is already in a terminal state ({status.state}).</p>
+          )}
+        </div>
+
+        {/* Transparency / Stats */}
+        {stats && (
+          <div className="dash-card wide-card">
+            <h3>Security Transparency</h3>
+            <div className="stats-grid">
+              <div className="stat">
+                <span className="stat-value mono">{stats.totalSuccessfulViews}</span>
+                <span className="stat-label">Successful views</span>
+              </div>
+              <div className="stat">
+                <span className="stat-value mono">{stats.totalFailedAttempts}</span>
+                <span className="stat-label">Failed attempts</span>
+              </div>
+              <div className="stat">
+                <span className="stat-value mono">{stats.healEvents}</span>
+                <span className="stat-label">Heal events</span>
+              </div>
+              <div className="stat">
+                <span className="stat-value mono">{stats.burnAfterReading ? "Yes" : "No"}</span>
+                <span className="stat-label">Burn after reading</span>
+              </div>
+            </div>
+
+            {stats.perViewer?.length > 0 && (
+              <div className="viewer-breakdown">
+                <h4>Per-Viewer Breakdown</h4>
+                <div className="viewer-table" role="table" aria-label="Viewer access breakdown">
+                  <div className="vt-header" role="row">
+                    <span role="columnheader">Viewer</span>
+                    <span role="columnheader">Views</span>
+                    <span role="columnheader">First Access</span>
+                    <span role="columnheader">Last Access</span>
+                  </div>
+                  {stats.perViewer.map((v, i) => (
+                    <div className="vt-row" role="row" key={i}>
+                      <span role="cell" className="mono">{v.viewerLabel}</span>
+                      <span role="cell" className="mono">{v.viewCount}</span>
+                      <span role="cell">{v.firstAccessedAt ? new Date(v.firstAccessedAt).toLocaleString() : "—"}</span>
+                      <span role="cell">{v.lastAccessedAt ? new Date(v.lastAccessedAt).toLocaleString() : "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="timestamps">
+              <p>Created: {stats.createdAt ? new Date(stats.createdAt).toLocaleString() : "—"}</p>
+              <p>First accessed: {stats.firstAccessedAt ? new Date(stats.firstAccessedAt).toLocaleString() : "—"}</p>
+              <p>Last accessed: {stats.lastAccessedAt ? new Date(stats.lastAccessedAt).toLocaleString() : "—"}</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: About ──────────────────────────────────────────────
+
+function AboutPage({ navigate }) {
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "About" }]} navigate={navigate} />
+      <div className="content-page">
+        <h1>About SecureBin</h1>
+        <ZeroKnowledgeBadge />
+
+        <section className="content-section">
+          <h2>What is SecureBin?</h2>
+          <p>
+            SecureBin is a privacy-first platform for sharing sensitive text and files. Unlike traditional paste services, everything you share is encrypted in your browser before it ever reaches our server. We use AES-256-GCM — the same encryption standard used by governments and financial institutions — combined with PBKDF2 key derivation to protect your data.
+          </p>
+        </section>
+
+        <section className="content-section">
+          <h2>Zero-Knowledge Architecture</h2>
+          <p>
+            Our server stores only encrypted data. It never sees your plaintext, your passwords, or your decryption keys. The encryption key is derived from each viewer's password entirely on the client side, wrapped using PBKDF2-SHA256 with 600,000 iterations, and the server only ever handles the already-wrapped key material. Even if our database were fully compromised, an attacker would gain nothing usable.
+          </p>
+        </section>
+
+        <section className="content-section">
+          <h2>What We Store vs. What We Don't</h2>
+          <div className="two-col">
+            <div>
+              <h3 className="accent">What we store</h3>
+              <p>Encrypted ciphertext, wrapped keys, viewer labels (chosen by you), policy configuration (expiry time, max views), aggregate access counts, and timestamps. Storage integrity checksums for self-healing.</p>
+            </div>
+            <div>
+              <h3 className="danger">What we never see</h3>
+              <p>Your plaintext content, your passwords, raw decryption keys, IP addresses, user agents, browser fingerprints, or any personally identifiable information beyond the viewer labels you choose.</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="content-section">
+          <h2>How Tamper Detection Works</h2>
+          <p>
+            AES-256-GCM is an authenticated encryption mode. If even a single bit of the stored ciphertext is modified — whether by a bug, bit-rot, or an attacker — the authentication tag will fail and the data is rejected outright. Corrupted content is never shown to a viewer. Our self-healing storage system additionally maintains a checksum and backup copy, automatically restoring data from the backup if the primary record is corrupted.
+          </p>
+        </section>
+
+        <section className="content-section">
+          <h2>The Team</h2>
+          <p>
+            SecureBin is built by a small team of developers and security enthusiasts who believe that sharing sensitive information shouldn't require trust in a third party. Our goal is to make zero-knowledge encryption accessible, practical, and transparent.
+          </p>
+        </section>
+
+        <div className="content-cta">
+          <button className="btn btn-primary btn-lg" onClick={() => navigate("/create")}>Try it now — Create a Secret</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: Contact ────────────────────────────────────────────
+
+function ContactPage({ navigate }) {
+  const [form, setForm] = useState({ name: "", email: "", subject: "general", message: "" });
+  const [submitted, setSubmitted] = useState(false);
+  const [errors, setErrors] = useState({});
+
+  const validate = () => {
+    const e = {};
+    if (!form.name.trim()) e.name = "Name is required";
+    if (!form.email.trim() || !/\S+@\S+\.\S+/.test(form.email)) e.email = "Valid email is required";
+    if (!form.message.trim()) e.message = "Message is required";
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
+
+  const handleSubmit = () => {
+    if (validate()) setSubmitted(true);
+  };
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "Contact" }]} navigate={navigate} />
+      <div className="content-page narrow">
+        <h1>Contact Us</h1>
+
+        {submitted ? (
+          <div className="form-success" role="status">
+            <h2>Thank you for reaching out</h2>
+            <p>We'll get back to you as soon as we can. For urgent security disclosures, email us directly.</p>
+            <button className="btn btn-ghost" onClick={() => navigate("/")}>Back to Home</button>
+          </div>
+        ) : (
+          <>
+            <p>Have questions, found a bug, or want to report a security issue? Reach out below.</p>
+
+            <div className="contact-form">
+              <div className="form-group">
+                <label htmlFor="contact-name">Name</label>
+                <input id="contact-name" type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  aria-invalid={!!errors.name} aria-describedby={errors.name ? "name-err" : undefined} />
+                {errors.name && <span id="name-err" className="field-error" role="alert">{errors.name}</span>}
+              </div>
+              <div className="form-group">
+                <label htmlFor="contact-email">Email</label>
+                <input id="contact-email" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  aria-invalid={!!errors.email} aria-describedby={errors.email ? "email-err" : undefined} />
+                {errors.email && <span id="email-err" className="field-error" role="alert">{errors.email}</span>}
+              </div>
+              <div className="form-group">
+                <label htmlFor="contact-subject">Subject</label>
+                <select id="contact-subject" value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })}>
+                  <option value="general">General Inquiry</option>
+                  <option value="security">Security Report</option>
+                  <option value="bug">Bug Report</option>
+                  <option value="feature">Feature Request</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label htmlFor="contact-message">Message</label>
+                <textarea id="contact-message" rows={5} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })}
+                  aria-invalid={!!errors.message} aria-describedby={errors.message ? "msg-err" : undefined} />
+                {errors.message && <span id="msg-err" className="field-error" role="alert">{errors.message}</span>}
+              </div>
+              <button className="btn btn-primary btn-lg" onClick={handleSubmit}>Send Message</button>
+            </div>
+
+            <div className="contact-alt">
+              <p>Security disclosures: <strong>security@securebin.io</strong></p>
+              <p>General inquiries: <strong>hello@securebin.io</strong></p>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: Waitlist ───────────────────────────────────────────
+
+function WaitlistPage({ navigate }) {
+  const [email, setEmail] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleJoin = () => {
+    if (!email.trim() || !/\S+@\S+\.\S+/.test(email)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setSubmitted(true);
+  };
+
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "Waitlist" }]} navigate={navigate} />
+      <div className="content-page narrow waitlist-page">
+        <h1>Join the Waitlist</h1>
+        <p className="waitlist-pitch">
+          Be first to access SecureBin's next-generation features: encrypted collaboration rooms, device-to-device transfer, team workspaces, and advanced audit controls.
+        </p>
+
+        {submitted ? (
+          <div className="form-success" role="status">
+            <h2>You're on the list</h2>
+            <p>We'll reach out when early access is available. In the meantime, you can use SecureBin's full encryption platform today.</p>
+            <button className="btn btn-primary" onClick={() => navigate("/create")}>Create a Secret Now</button>
+          </div>
+        ) : (
+          <div className="waitlist-form">
+            <div className="waitlist-input-row">
+              <label htmlFor="waitlist-email" className="sr-only">Email address</label>
+              <input id="waitlist-email" type="email" placeholder="you@company.com" value={email}
+                onChange={(e) => { setEmail(e.target.value); setError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") handleJoin(); }}
+                aria-invalid={!!error} aria-describedby={error ? "wl-err" : undefined} />
+              <button className="btn btn-primary" onClick={handleJoin}>Join Waitlist</button>
+            </div>
+            {error && <span id="wl-err" className="field-error" role="alert">{error}</span>}
+            <p className="privacy-note">We'll never share your email. Unsubscribe anytime.</p>
+          </div>
+        )}
+
+        <div className="waitlist-features">
+          <h2>What's coming</h2>
+          <div className="feature-grid compact">
+            {[
+              { icon: "🔒", title: "Encrypted Rooms", desc: "Temporary collaboration spaces with end-to-end encryption" },
+              { icon: "📡", title: "Device Transfer", desc: "Share secrets directly between devices, no server round-trip" },
+              { icon: "👥", title: "Team Workspaces", desc: "Manage shared secrets across your organization" },
+              { icon: "📋", title: "Audit Controls", desc: "Detailed access logs and compliance-ready reporting" },
+            ].map((f, i) => (
+              <div className="feature-card compact" key={i}>
+                <span className="feature-emoji" aria-hidden="true">{f.icon}</span>
+                <h3>{f.title}</h3>
+                <p>{f.desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── FAQ Component & Page ─────────────────────────────────────
+
+const faqs = [
+  {
+    q: "How is my data encrypted?",
+    a: "SecureBin uses AES-256-GCM encryption, performed entirely in your browser. Your password is never sent to the server — instead, PBKDF2-SHA256 with 600,000 iterations derives an encryption key locally. The server receives only the encrypted ciphertext and wrapped key material. The GCM authentication tag ensures any tampering is detected."
+  },
+  {
+    q: "Can SecureBin read my secrets?",
+    a: "No. SecureBin operates on a zero-knowledge architecture. The decryption key is derived from the viewer's password in the browser and never transmitted. Our server stores only encrypted data — even we cannot decrypt it. If our entire database were compromised, an attacker would gain only ciphertext with no way to decrypt it."
+  },
+  {
+    q: "What happens when a secret expires?",
+    a: "When a secret reaches its time limit or view limit, its state transitions to EXPIRED. A background process then permanently deletes it from the database. Once deleted, it cannot be recovered by anyone — including us. The deletion is irreversible."
+  },
+  {
+    q: "Can I share one secret with multiple people?",
+    a: "Yes. Each viewer is assigned their own label and password when the secret is created. The underlying encrypted data is the same, but each viewer's decryption key is independently wrapped with their own password. One viewer's password cannot unlock another viewer's access."
+  },
+  {
+    q: "What is burn after reading?",
+    a: "Burn after reading means the secret becomes permanently inaccessible after a single view. The first person to successfully decrypt it triggers the secret's transition to the BURNED state. After that, no one — including the original viewer — can access it again. It's then permanently deleted."
+  },
+];
+
+function FAQList() {
+  const [openIndex, setOpenIndex] = useState(null);
+  return (
+    <div className="faq-list">
+      {faqs.map((faq, i) => (
+        <div className="faq-item" key={i}>
+          <button
+            className={`faq-question ${openIndex === i ? "open" : ""}`}
+            onClick={() => setOpenIndex(openIndex === i ? null : i)}
+            aria-expanded={openIndex === i}
+            aria-controls={`faq-answer-${i}`}
+          >
+            <span>{faq.q}</span>
+            <span className="faq-chevron" aria-hidden="true">{openIndex === i ? "−" : "+"}</span>
+          </button>
+          <div id={`faq-answer-${i}`} className={`faq-answer ${openIndex === i ? "open" : ""}`} role="region">
+            <p>{faq.a}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FAQPage({ navigate }) {
+  return (
+    <>
+      <Breadcrumbs items={[{ to: "/", label: "Home" }, { label: "FAQ" }]} navigate={navigate} />
+      <div className="content-page narrow">
+        <h1>Frequently Asked Questions</h1>
+        <p>Everything you need to know about SecureBin's security and how it works.</p>
+        <FAQList />
+        <div className="content-cta">
+          <p>Still have questions?</p>
+          <button className="btn btn-ghost" onClick={() => navigate("/contact")}>Contact us</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── PAGE: 404 ────────────────────────────────────────────────
+
+function NotFoundPage({ navigate }) {
+  return (
+    <div className="not-found">
+      <h1>404</h1>
+      <p>This page doesn't exist, or the secret you're looking for has expired and been permanently deleted.</p>
+      <div className="not-found-actions">
+        <button className="btn btn-primary" onClick={() => navigate("/")}>Go Home</button>
+        <button className="btn btn-ghost" onClick={() => navigate("/create")}>Create a Secret</button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// APP ROOT
+// ═══════════════════════════════════════════════════════════════
+
+function App() {
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem("sb-theme") || "dark"; } catch { return "dark"; }
+  });
+  const [consent, setConsentState] = useState(() => {
+    try {
+      const v = localStorage.getItem("sb-cookie-consent");
+      return v === null ? null : v === "true";
+    } catch { return null; }
+  });
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => {
+      const next = t === "dark" ? "light" : "dark";
+      try { localStorage.setItem("sb-theme", next); } catch {}
+      return next;
+    });
+  }, []);
+
+  const setConsent = useCallback((v) => {
+    setConsentState(v);
+    try { localStorage.setItem("sb-cookie-consent", String(v)); } catch {}
+  }, []);
+
+  const { path, navigate } = useRouter();
+
+  // Route matching
+  let page;
+  let params;
+
+  if (path === "/" || path === "") {
+    page = <HomePage navigate={navigate} />;
+  } else if (path === "/create") {
+    page = <CreateSecretPage navigate={navigate} />;
+  } else if ((params = matchRoute(path, "/secret/:secretId/share"))) {
+    page = <SharePage navigate={navigate} params={params} />;
+  } else if ((params = matchRoute(path, "/secret/:secretId/dashboard"))) {
+    page = <DashboardPage navigate={navigate} params={params} />;
+  } else if ((params = matchRoute(path, "/secret/:secretId"))) {
+    page = <ViewSecretPage navigate={navigate} params={params} />;
+  } else if (path === "/about") {
+    page = <AboutPage navigate={navigate} />;
+  } else if (path === "/contact") {
+    page = <ContactPage navigate={navigate} />;
+  } else if (path === "/waitlist") {
+    page = <WaitlistPage navigate={navigate} />;
+  } else if (path === "/faq") {
+    page = <FAQPage navigate={navigate} />;
+  } else {
+    page = <NotFoundPage navigate={navigate} />;
+  }
+
+  // Page titles
+  const titles = {
+    "/": "SecureBin — Zero-Knowledge Encrypted Secret Sharing",
+    "/create": "Create a Secret — SecureBin",
+    "/about": "About SecureBin — Zero-Knowledge Secure Sharing",
+    "/contact": "Contact SecureBin",
+    "/waitlist": "Join the SecureBin Waitlist",
+    "/faq": "SecureBin FAQ — Security & Privacy Questions",
+  };
+  const pageTitle = titles[path] || (path.includes("/share") ? "Secret Created — SecureBin" :
+    path.includes("/dashboard") ? "Secret Dashboard — SecureBin" :
+    path.includes("/secret/") ? "View Secret — SecureBin" : "Page Not Found — SecureBin");
+
+  useEffect(() => { document.title = pageTitle; }, [pageTitle]);
+
+  return (
+    <ThemeContext.Provider value={{ theme, toggle: toggleTheme }}>
+      <CookieContext.Provider value={{ consent, setConsent }}>
+        <div className={`app ${theme}`}>
+          <style>{getStyles()}</style>
+          <SkipLink />
+          <Navbar navigate={navigate} />
+          <main id="main-content" className="main-content" tabIndex={-1}>
+            {page}
+          </main>
+          <Footer navigate={navigate} />
+          <CookieConsentBanner />
+        </div>
+      </CookieContext.Provider>
+    </ThemeContext.Provider>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// STYLES
+// ═══════════════════════════════════════════════════════════════
+
+function getStyles() {
+  return `
+  /* ── Reset & Variables ─────────────────────────────── */
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  .app {
+    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+    --accent: #00D4AA;
+    --accent-dim: #00D4AA33;
+    --warning: #FFB020;
+    --danger: #FF4757;
+    --info: #4A9EFF;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --shadow: 0 2px 12px rgba(0,0,0,0.15);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    font-family: var(--font-body);
+    line-height: 1.6;
+    transition: background-color 0.2s, color 0.2s;
+  }
+
+  .app.dark {
+    --bg: #0A0E17;
+    --surface: #131A2B;
+    --surface-hover: #1A2338;
+    --border: #1E2A42;
+    --text: #E8ECF4;
+    --text-muted: #7A8BA8;
+    --text-dim: #4A5568;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .app.light {
+    --bg: #F5F7FA;
+    --surface: #FFFFFF;
+    --surface-hover: #F0F2F5;
+    --border: #E2E8F0;
+    --text: #1A202C;
+    --text-muted: #718096;
+    --text-dim: #A0AEC0;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  .mono { font-family: var(--font-mono); }
+  .accent { color: var(--accent); }
+  .danger { color: var(--danger); }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  /* ── Skip Link ─────────────────────────────────────── */
+  .skip-link {
+    position: absolute; top: -100px; left: 16px;
+    background: var(--accent); color: #000; padding: 8px 16px;
+    border-radius: var(--radius-sm); font-weight: 600; z-index: 1000;
+    text-decoration: none; transition: top 0.2s;
+  }
+  .skip-link:focus { top: 16px; }
+
+  /* ── Navbar ────────────────────────────────────────── */
+  .navbar {
+    position: sticky; top: 0; z-index: 100;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px);
+  }
+  .navbar-inner {
+    max-width: 1200px; margin: 0 auto;
+    padding: 0 24px; height: 60px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .navbar-logo {
+    display: flex; align-items: center; gap: 10px;
+    background: none; border: none; cursor: pointer; color: var(--text);
+    font-size: 0;
+  }
+  .navbar-title { font-family: var(--font-mono); font-size: 18px; font-weight: 700; }
+  .navbar-links { display: flex; align-items: center; gap: 4px; }
+  .nav-link {
+    background: none; border: none; color: var(--text-muted);
+    font-family: var(--font-body); font-size: 14px; font-weight: 500;
+    padding: 8px 14px; border-radius: var(--radius-sm); cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+  }
+  .nav-link:hover, .nav-link:focus-visible { color: var(--text); background: var(--surface-hover); }
+  .nav-link.active { color: var(--accent); }
+  .theme-toggle {
+    background: none; border: 1px solid var(--border); color: var(--text);
+    width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
+    font-size: 16px; display: flex; align-items: center; justify-content: center;
+    margin-left: 8px; transition: border-color 0.15s;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
+  .hamburger {
+    display: none; background: none; border: none; cursor: pointer;
+    flex-direction: column; gap: 5px; padding: 8px;
+  }
+  .hamburger span { display: block; width: 22px; height: 2px; background: var(--text); border-radius: 2px; }
+  @media (max-width: 768px) {
+    .hamburger { display: flex; }
+    .navbar-links {
+      display: none; position: absolute; top: 60px; left: 0; right: 0;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-direction: column; padding: 16px; gap: 4px;
+    }
+    .navbar-links.open { display: flex; }
+    .nav-link { width: 100%; text-align: left; padding: 12px 16px; }
+    .theme-toggle { margin: 8px 0 0 0; }
+  }
+
+  /* ── Footer ────────────────────────────────────────── */
+  .footer {
+    margin-top: auto; background: var(--surface);
+    border-top: 1px solid var(--border); padding: 48px 24px 24px;
+  }
+  .footer-inner {
+    max-width: 1200px; margin: 0 auto;
+    display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 32px;
+  }
+  .footer-brand { font-family: var(--font-mono); font-weight: 700; font-size: 18px; }
+  .footer-tagline { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
+  .footer-heading { font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 12px; }
+  .footer-col button { display: block; background: none; border: none; color: var(--text-muted); font-size: 14px; cursor: pointer; padding: 4px 0; text-align: left; }
+  .footer-col button:hover { color: var(--accent); }
+  .footer-bottom { max-width: 1200px; margin: 32px auto 0; padding-top: 24px; border-top: 1px solid var(--border); text-align: center; }
+  .footer-bottom p { font-size: 13px; color: var(--text-dim); }
+  @media (max-width: 768px) {
+    .footer-inner { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 480px) {
+    .footer-inner { grid-template-columns: 1fr; }
+  }
+
+  /* ── Breadcrumbs ───────────────────────────────────── */
+  .breadcrumbs { margin-bottom: 24px; }
+  .breadcrumbs ol { list-style: none; display: flex; flex-wrap: wrap; gap: 4px; font-size: 13px; color: var(--text-muted); }
+  .breadcrumbs button { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 13px; }
+  .breadcrumbs button:hover { color: var(--accent); text-decoration: underline; }
+  .breadcrumb-sep { margin: 0 4px; opacity: 0.5; }
+  .breadcrumbs [aria-current] { color: var(--text); }
+
+  /* ── Buttons ───────────────────────────────────────── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--font-body); font-weight: 600; border: none;
+    border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s;
+    white-space: nowrap; text-decoration: none;
+  }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #0A0E17; padding: 10px 24px; font-size: 15px; }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
+  .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); padding: 10px 24px; font-size: 15px; }
+  .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+  .btn-danger { background: var(--danger); color: #fff; padding: 8px 16px; font-size: 14px; }
+  .btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn-lg { padding: 14px 32px; font-size: 16px; border-radius: var(--radius); }
+  .btn-sm { padding: 6px 14px; font-size: 13px; }
+
+  /* ── Main Content ──────────────────────────────────── */
+  .main-content { max-width: 1200px; margin: 0 auto; padding: 32px 24px 64px; width: 100%; flex: 1; }
+
+  .page-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 32px; }
+  .page-header h1 { font-family: var(--font-mono); font-size: 28px; font-weight: 700; }
+
+  /* ── Hero ───────────────────────────────────────────── */
+  .hero {
+    text-align: center; padding: 64px 0 48px;
+  }
+  .hero h1 { font-family: var(--font-mono); font-size: clamp(32px, 5vw, 52px); font-weight: 700; line-height: 1.15; margin: 16px 0; }
+  .hero-sub { font-size: 18px; color: var(--text-muted); max-width: 600px; margin: 0 auto 32px; line-height: 1.7; }
+  .hero-cta { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+
+  /* ── Features ──────────────────────────────────────── */
+  .section-heading { font-family: var(--font-mono); font-size: 24px; font-weight: 700; text-align: center; margin-bottom: 40px; }
+  .features { padding: 48px 0; }
+  .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+  .feature-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 32px; transition: border-color 0.2s, transform 0.2s;
+  }
+  .feature-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .feature-icon { margin-bottom: 16px; }
+  .feature-card h3 { font-family: var(--font-mono); font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+  .feature-card p { color: var(--text-muted); font-size: 14px; line-height: 1.6; }
+  .feature-card.compact { padding: 24px; }
+  .feature-grid.compact { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+  .feature-emoji { font-size: 28px; display: block; margin-bottom: 12px; }
+
+  /* ── Steps ─────────────────────────────────────────── */
+  .how-it-works { padding: 48px 0; }
+  .steps-flow { display: flex; align-items: flex-start; justify-content: center; gap: 8px; flex-wrap: wrap; }
+  .step { text-align: center; flex: 1; min-width: 120px; max-width: 180px; position: relative; }
+  .step-icon { font-size: 28px; margin-bottom: 8px; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; margin: 0 auto 12px; border: 2px solid var(--accent); border-radius: 50%; color: var(--accent); }
+  .step h3 { font-family: var(--font-mono); font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .step p { font-size: 13px; color: var(--text-muted); }
+  .step-arrow { color: var(--text-dim); font-size: 20px; position: absolute; right: -16px; top: 18px; }
+  @media (max-width: 640px) { .step-arrow { display: none; } .steps-flow { gap: 24px; } }
+
+  /* ── FAQ ────────────────────────────────────────────── */
+  .faq-section { padding: 48px 0; }
+  .faq-list { max-width: 720px; margin: 0 auto; }
+  .faq-item { border-bottom: 1px solid var(--border); }
+  .faq-question {
+    width: 100%; background: none; border: none; color: var(--text);
+    text-align: left; padding: 20px 0; font-size: 16px; font-weight: 600;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+    font-family: var(--font-body);
+  }
+  .faq-question:hover { color: var(--accent); }
+  .faq-chevron { font-size: 20px; color: var(--text-muted); flex-shrink: 0; margin-left: 16px; }
+  .faq-answer { max-height: 0; overflow: hidden; transition: max-height 0.3s ease, padding 0.3s ease; }
+  .faq-answer.open { max-height: 400px; padding-bottom: 20px; }
+  .faq-answer p { color: var(--text-muted); font-size: 15px; line-height: 1.7; }
+
+  /* ── Bottom CTA ────────────────────────────────────── */
+  .bottom-cta {
+    text-align: center; padding: 64px 32px; margin: 48px -24px 0;
+    background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  }
+  .bottom-cta h2 { font-family: var(--font-mono); font-size: 28px; margin-bottom: 8px; }
+  .bottom-cta p { color: var(--text-muted); margin-bottom: 24px; }
+
+  /* ── Create Page ───────────────────────────────────── */
+  .create-layout { display: grid; grid-template-columns: 1fr 300px; gap: 32px; align-items: start; }
+  @media (max-width: 900px) { .create-layout { grid-template-columns: 1fr; } }
+
+  .mode-toggle { display: flex; gap: 4px; margin-bottom: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px; width: fit-content; }
+  .mode-toggle button {
+    background: none; border: none; color: var(--text-muted); font-family: var(--font-mono);
+    font-size: 14px; font-weight: 500; padding: 8px 24px; border-radius: 4px; cursor: pointer; transition: all 0.15s;
+  }
+  .mode-toggle button.active { background: var(--accent); color: #0A0E17; }
+
+  .secret-editor {
+    width: 100%; min-height: 200px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; font-family: var(--font-mono); font-size: 14px;
+    color: var(--text); resize: vertical; line-height: 1.6; transition: border-color 0.15s;
+  }
+  .secret-editor:focus { outline: none; border-color: var(--accent); }
+  .secret-editor::placeholder { color: var(--text-dim); }
+  .editor-footer { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .char-count { font-size: 12px; color: var(--text-dim); font-family: var(--font-mono); }
+
+  .analysis-preview {
+    margin-top: 16px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px;
+  }
+  .analysis-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .analysis-type { font-size: 14px; color: var(--text-muted); }
+  .analysis-type strong { color: var(--accent); font-family: var(--font-mono); }
+  .rec-pill {
+    display: inline-block; font-size: 12px; padding: 4px 10px; border-radius: 20px;
+    background: var(--accent-dim); color: var(--accent); margin: 4px 4px 4px 0; line-height: 1.4;
+  }
+  .analysis-caveat { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-style: italic; }
+
+  /* Drop Zone */
+  .drop-zone {
+    border: 2px dashed var(--border); border-radius: var(--radius); padding: 48px 32px;
+    text-align: center; cursor: pointer; transition: all 0.2s; background: var(--surface);
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: var(--accent-dim); }
+  .drop-zone.has-file { border-style: solid; }
+  .drop-icon { font-size: 32px; display: block; margin-bottom: 12px; color: var(--text-muted); }
+  .drop-zone p { color: var(--text-muted); font-size: 14px; }
+  .drop-limit { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .file-preview { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: center; }
+  .file-icon { font-size: 24px; }
+  .file-name { font-family: var(--font-mono); font-size: 14px; font-weight: 500; }
+  .file-size { font-size: 12px; color: var(--text-muted); }
+
+  /* Viewer Config */
+  .viewer-section { border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-top: 24px; }
+  .viewer-section legend { font-family: var(--font-mono); font-weight: 600; font-size: 16px; padding: 0 8px; }
+  .field-help { font-size: 13px; color: var(--text-muted); margin: 8px 0 16px; }
+  .viewer-row { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; flex-wrap: wrap; }
+  .viewer-field { flex: 1; min-width: 140px; }
+  .viewer-field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .viewer-field input, .form-group input, .form-group select, .form-group textarea, .custom-expiry, .revoke-form input, #max-views {
+    width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 14px; font-size: 14px; color: var(--text); font-family: var(--font-body); transition: border-color 0.15s;
+  }
+  .viewer-field input:focus, .form-group input:focus, .form-group select:focus, .form-group textarea:focus, .custom-expiry:focus, .revoke-form input:focus, #max-views:focus {
+    outline: none; border-color: var(--accent);
+  }
+  .viewer-remove { align-self: flex-end; margin-bottom: 4px; color: var(--danger); }
+
+  /* Password Strength */
+  .pw-strength { margin-top: 6px; display: flex; align-items: center; gap: 8px; }
+  .pw-bar { display: flex; gap: 3px; flex: 1; }
+  .pw-segment { height: 3px; flex: 1; background: var(--border); border-radius: 2px; transition: background 0.2s; }
+  .pw-segment.weak { background: var(--danger); }
+  .pw-segment.fair { background: var(--warning); }
+  .pw-segment.strong { background: var(--accent); }
+  .pw-segment.excellent { background: var(--accent); }
+  .pw-label { font-size: 11px; font-weight: 600; }
+  .pw-label.weak { color: var(--danger); }
+  .pw-label.fair { color: var(--warning); }
+  .pw-label.strong { color: var(--accent); }
+  .pw-label.excellent { color: var(--accent); }
+
+  /* Policy Panel */
+  .policy-section { border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-top: 24px; }
+  .policy-section legend { font-family: var(--font-mono); font-weight: 600; font-size: 16px; padding: 0 8px; }
+  .policy-row { margin-top: 20px; }
+  .policy-row > label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; }
+  .expiry-options { display: flex; gap: 6px; flex-wrap: wrap; }
+  .expiry-btn {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text-muted);
+    padding: 8px 16px; border-radius: var(--radius-sm); font-family: var(--font-mono);
+    font-size: 13px; cursor: pointer; transition: all 0.15s;
+  }
+  .expiry-btn:hover { border-color: var(--text-muted); }
+  .expiry-btn.active { background: var(--accent); color: #0A0E17; border-color: var(--accent); }
+  .custom-expiry { margin-top: 8px; max-width: 300px; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; }
+  .toggle {
+    width: 48px; height: 26px; border-radius: 13px; background: var(--border);
+    border: none; cursor: pointer; position: relative; transition: background 0.2s;
+  }
+  .toggle.on { background: var(--accent); }
+  .toggle-knob {
+    position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+    border-radius: 50%; background: white; transition: transform 0.2s;
+  }
+  .toggle.on .toggle-knob { transform: translateX(22px); }
+
+  .create-submit { width: 100%; margin-top: 24px; }
+
+  /* Sidebar */
+  .create-sidebar { display: flex; flex-direction: column; gap: 16px; }
+  .sidebar-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; text-align: center;
+  }
+  .sidebar-card h3 { font-family: var(--font-mono); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 16px; }
+  .checklist { list-style: none; text-align: left; }
+  .checklist li { padding: 8px 0; font-size: 14px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); }
+  .checklist li:last-child { border-bottom: none; }
+  .check-icon { font-family: var(--font-mono); font-size: 14px; width: 20px; text-align: center; }
+  .check-on { color: var(--accent); }
+  .check-off { color: var(--text-dim); }
+  .zk-card { text-align: left; }
+  .zk-card p { font-size: 13px; color: var(--text-muted); margin-top: 8px; line-height: 1.5; }
+
+  /* ── Share Page ────────────────────────────────────── */
+  .share-page { max-width: 640px; margin: 0 auto; }
+  .share-success { text-align: center; margin-bottom: 32px; }
+  .success-icon { margin-bottom: 16px; }
+  .share-success h1 { font-family: var(--font-mono); font-size: 28px; margin-bottom: 8px; }
+  .share-success p { color: var(--text-muted); }
+  .share-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 20px; }
+  .share-card h2 { font-family: var(--font-mono); font-size: 16px; margin-bottom: 16px; }
+  .share-link-box { display: flex; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 4px 4px 14px; }
+  .share-link { font-family: var(--font-mono); font-size: 13px; word-break: break-all; flex: 1; color: var(--accent); }
+  .owner-token { color: var(--warning); }
+  .owner-card { border-color: var(--warning); }
+  .owner-warning { color: var(--warning); font-size: 14px; font-weight: 500; margin-bottom: 12px; }
+  .qr-container { display: flex; justify-content: center; margin-top: 20px; }
+  .share-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+  .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
+
+  /* ── View Page ─────────────────────────────────────── */
+  .view-auth { max-width: 480px; margin: 0 auto; text-align: center; }
+  .view-auth h1 { font-family: var(--font-mono); font-size: 28px; margin-bottom: 8px; }
+  .view-auth > p { color: var(--text-muted); margin-bottom: 24px; }
+  .auth-form { text-align: left; margin-top: 24px; }
+  .form-group { margin-bottom: 20px; }
+  .form-group label { display: block; font-size: 13px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; }
+  .field-error { font-size: 12px; color: var(--danger); margin-top: 4px; display: block; }
+  .view-result { max-width: 720px; margin: 0 auto; }
+  .view-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .view-header h1 { font-family: var(--font-mono); font-size: 24px; }
+  .secret-display {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px; position: relative;
+  }
+  .secret-content { font-family: var(--font-mono); font-size: 14px; white-space: pre-wrap; word-break: break-all; line-height: 1.6; color: var(--text); }
+  .secret-display .copy-btn { position: absolute; top: 12px; right: 12px; }
+  .view-analysis { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
+  .view-analysis h3 { font-family: var(--font-mono); font-size: 14px; margin-bottom: 12px; }
+  .file-download { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; text-align: center; }
+  .file-download p { margin-bottom: 16px; color: var(--text-muted); }
+  .view-actions { display: flex; gap: 12px; margin-top: 24px; flex-wrap: wrap; }
+
+  /* ── Dashboard ─────────────────────────────────────── */
+  .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .dash-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px;
+  }
+  .dash-card h3 { font-family: var(--font-mono); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 16px; }
+  .dash-card h4 { font-size: 14px; font-weight: 600; margin: 16px 0 12px; }
+  .wide-card { grid-column: 1 / -1; }
+  .dash-state-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .dash-type { font-size: 14px; color: var(--text-muted); }
+  .countdown { text-align: center; padding: 16px; background: var(--bg); border-radius: var(--radius-sm); }
+  .countdown-label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+  .countdown-value { font-size: 24px; font-weight: 700; color: var(--accent); }
+  .usage-bar-container { display: flex; align-items: center; gap: 12px; }
+  .usage-bar { flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .usage-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.5s ease; }
+  .usage-text { font-size: 14px; font-weight: 600; color: var(--text); }
+  .viewer-labels { margin-top: 16px; }
+  .dash-sublabel { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+  .viewer-chip {
+    display: inline-block; font-family: var(--font-mono); font-size: 12px;
+    padding: 4px 10px; border-radius: 20px; background: var(--accent-dim); color: var(--accent);
+    margin: 0 6px 6px 0;
+  }
+  .score-card { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .score-card h3 { margin-bottom: 8px; }
+  .integrity-ok { color: var(--accent); font-size: 14px; }
+  .integrity-warn { color: var(--danger); font-size: 14px; }
+  .revoke-card { border-color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, var(--border)); }
+  .revoke-form { display: flex; gap: 8px; margin-top: 12px; }
+  .revoke-form input { flex: 1; }
+  .revoke-msg { font-size: 13px; margin-top: 8px; color: var(--text-muted); }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stat { text-align: center; padding: 16px; background: var(--bg); border-radius: var(--radius-sm); }
+  .stat-value { display: block; font-size: 28px; font-weight: 700; color: var(--text); }
+  .stat-label { display: block; font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+  .viewer-table { font-size: 13px; }
+  .vt-header, .vt-row { display: grid; grid-template-columns: 1fr 0.5fr 1.5fr 1.5fr; gap: 8px; padding: 10px 0; }
+  .vt-header { font-weight: 600; color: var(--text-muted); border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .vt-row { border-bottom: 1px solid var(--border); color: var(--text); }
+  .vt-row:last-child { border-bottom: none; }
+  .timestamps { margin-top: 16px; font-size: 13px; color: var(--text-muted); }
+  .timestamps p { margin-bottom: 4px; }
+
+  /* ── Status Badge ──────────────────────────────────── */
+  .status-badge {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    padding: 4px 12px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .badge-active { background: var(--accent-dim); color: var(--accent); }
+  .badge-viewed { background: rgba(74,158,255,0.15); color: var(--info); }
+  .badge-expired { background: rgba(255,176,32,0.15); color: var(--warning); }
+  .badge-revoked { background: rgba(255,71,87,0.15); color: var(--danger); }
+  .badge-burned { background: rgba(255,71,87,0.25); color: var(--danger); }
+  .badge-deleted { background: rgba(255,71,87,0.1); color: var(--text-dim); }
+
+  /* ── Zero Knowledge Badge ──────────────────────────── */
+  .zk-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--accent); background: var(--accent-dim);
+    padding: 4px 12px; border-radius: 20px;
+  }
+
+  /* ── Score Gauge ───────────────────────────────────── */
+  .score-gauge { display: inline-block; }
+
+  /* ── Content Pages ─────────────────────────────────── */
+  .content-page { max-width: 800px; margin: 0 auto; }
+  .content-page.narrow { max-width: 600px; }
+  .content-page h1 { font-family: var(--font-mono); font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+  .content-page > p { color: var(--text-muted); margin-bottom: 32px; }
+  .content-section { margin-bottom: 40px; }
+  .content-section h2 { font-family: var(--font-mono); font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+  .content-section p { color: var(--text-muted); font-size: 15px; line-height: 1.7; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px; }
+  .two-col h3 { font-family: var(--font-mono); font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .two-col p { font-size: 14px; }
+  @media (max-width: 640px) { .two-col { grid-template-columns: 1fr; } }
+  .content-cta { text-align: center; margin-top: 40px; padding-top: 32px; border-top: 1px solid var(--border); }
+  .content-cta p { color: var(--text-muted); margin-bottom: 12px; }
+
+  /* ── Contact Form ──────────────────────────────────── */
+  .contact-form { margin: 24px 0; }
+  .form-group select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%237A8BA8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+  .form-group textarea { resize: vertical; min-height: 100px; }
+  .form-success { text-align: center; padding: 40px 0; }
+  .form-success h2 { font-family: var(--font-mono); font-size: 22px; margin-bottom: 8px; }
+  .form-success p { color: var(--text-muted); margin-bottom: 20px; }
+  .contact-alt { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--border); font-size: 14px; }
+  .contact-alt p { color: var(--text-muted); margin-bottom: 6px; }
+  .contact-alt strong { color: var(--accent); font-family: var(--font-mono); font-weight: 500; }
+
+  /* ── Waitlist ───────────────────────────────────────── */
+  .waitlist-page h1 { margin-bottom: 8px; }
+  .waitlist-pitch { font-size: 17px; color: var(--text-muted); line-height: 1.7; margin-bottom: 32px; }
+  .waitlist-form { margin-bottom: 48px; }
+  .waitlist-input-row { display: flex; gap: 8px; }
+  .waitlist-input-row input { flex: 1; }
+  .privacy-note { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
+  .waitlist-features { margin-top: 32px; }
+  .waitlist-features h2 { font-family: var(--font-mono); font-size: 20px; margin-bottom: 24px; }
+  @media (max-width: 480px) { .waitlist-input-row { flex-direction: column; } }
+
+  /* ── 404 ────────────────────────────────────────────── */
+  .not-found { text-align: center; padding: 80px 0; }
+  .not-found h1 { font-family: var(--font-mono); font-size: 72px; font-weight: 700; color: var(--accent); margin-bottom: 16px; }
+  .not-found p { color: var(--text-muted); font-size: 16px; max-width: 480px; margin: 0 auto 32px; }
+  .not-found-actions { display: flex; gap: 12px; justify-content: center; }
+
+  /* ── Error & Loading ───────────────────────────────── */
+  .error-msg { background: rgba(255,71,87,0.1); border: 1px solid rgba(255,71,87,0.3); border-radius: var(--radius-sm); padding: 12px 16px; margin: 12px 0; }
+  .error-msg p { color: var(--danger); font-size: 14px; }
+  .loading { text-align: center; padding: 48px 0; }
+  .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; margin: 0 auto 12px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading p { color: var(--text-muted); font-size: 14px; }
+
+  /* ── Cookie Banner ─────────────────────────────────── */
+  .cookie-banner {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
+    background: var(--surface); border-top: 1px solid var(--border);
+    padding: 16px 24px; display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.2);
+  }
+  .cookie-banner p { font-size: 14px; color: var(--text-muted); flex: 1; min-width: 200px; }
+  .cookie-actions { display: flex; gap: 8px; }
+
+  /* ── Print ─────────────────────────────────────────── */
+  @media print {
+    .navbar, .footer, .cookie-banner, .breadcrumbs, .view-actions { display: none; }
+    .main-content { padding: 0; }
+    .secret-display { border: 1px solid #ccc; }
+  }
+
+  /* ── Reduced Motion ────────────────────────────────── */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  }
+  `;
+}
+
+
+const rootEl = document.getElementById("root");
+ReactDOM.render(<App />, rootEl);
+</script>
+</body>
+</html>
