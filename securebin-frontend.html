@@ -51,7 +51,7 @@ const CookieContext = createContext({ consent: null, setConsent: () => {} });
 
 // ── secretsApi (inline for artifact) ─────────────────────────
 
-const API_BASE = new URLSearchParams(window.location.search).get("api") || "http://localhost:3000";
+const API_BASE = new URLSearchParams(window.location.search).get("api") || "https://clonefest-1.onrender.com";
 
 const secretsApi = {
   async createTextSecret(envelope, policy = {}) {
