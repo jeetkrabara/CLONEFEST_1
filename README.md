@@ -2,86 +2,113 @@
 
 ## Zero-Knowledge Secure Secret Sharing
 
-SecureBin is a secure platform for sharing sensitive text and files over the internet.
+SecureBin is a secure platform for sharing sensitive text and files without exposing the actual secret or raw decryption key to the backend.
 
-The main idea is simple: **encrypt the data on the client side before it reaches the server, keep the decryption material separate from the shareable URL, and give the creator control over the entire lifecycle of the secret.**
+The main idea is simple: **encrypt the data on the client side, keep the raw decryption secret separate from the shareable URL, and give the creator control over the complete lifecycle of the secret.**
 
-SecureBin was inspired by the secure-sharing concept behind PrivateBin, but extends it with additional access control, lifecycle management, security analysis, integrity recovery and privacy features.
+PrivateBin was the starting inspiration for the project, but SecureBin extends the secure-sharing concept with additional access control, lifecycle policies, security analysis, privacy features and self-healing encrypted storage.
 
 ---
 
 ## Key Features
 
-### 1. Client-Side Encryption
+### 1. Client-Side AES-256-GCM Encryption
 
 - Secrets are encrypted in the browser before being sent to the backend.
 - Uses **AES-256-GCM** for encryption.
 - Fresh random IVs are generated for encryption operations.
-- AES-GCM also provides tamper detection.
+- AES-GCM provides authentication and tamper detection.
 
 ### 2. Zero-Knowledge Architecture
 
-- The backend does not receive the plaintext secret.
+- Plaintext secrets are not sent to the backend.
 - Raw decryption keys are not sent to the server.
 - Raw user passwords are not stored by the server.
-- The backend mainly handles encrypted data, wrapped keys and the metadata required for lifecycle management.
+- The backend mainly handles encrypted data, wrapped keys and lifecycle metadata.
+- SecureBin includes an `isZeroKnowledge()` security indicator.
 
-### 3. Decryption Key Not Stored in the URL
+### 3. Decryption Secret Separated from the URL
 
 - The shareable URL contains only a randomly generated `secretId`.
-- The decryption secret is kept separate from the URL.
-- Having the link alone does not provide the decryption material.
+- The raw decryption secret is kept separate from the URL.
+- The raw master key does not reach the server.
+- For multi-viewer sharing, the master key is individually wrapped for each viewer.
 
-This was one of the main security changes we made compared with the traditional PrivateBin-style approach.
+### 4. Per-Viewer Password Protection
 
-### 4. Multi-Viewer Sharing
+Each viewer can have an individual password.
 
-- A single secret can be shared with multiple viewers.
-- Each viewer can have their own password.
-- Each viewer gets an independently wrapped copy of the master encryption key.
+SecureBin uses:
+
+- PBKDF2
+- SHA-256
+- 600,000 iterations
+- A separate random salt for each viewer
+
+This allows different viewers to access the same encrypted secret using their own credentials.
+
+### 5. Multi-Viewer Secure Sharing
+
+A single encrypted secret can be shared with multiple authorized viewers.
+
+- Each viewer has their own password.
+- Each viewer receives an independently wrapped copy of the master encryption key.
 - The actual secret only needs to be encrypted once.
 
-SecureBin uses envelope encryption to achieve this.
+SecureBin uses envelope encryption for this process.
 
-### 5. Secret Lifecycle Management
+### 6. Security Policy Engine
 
-Creators can control how long and how often their secrets can be accessed.
-
-Available controls include:
+SecureBin has a backend-enforced Security Policy Engine that combines:
 
 - Time-based expiration
 - Maximum view limits
-- Burn after reading
-- Manual revocation
+- Burn-after-reading
+
+These policies are checked before access is allowed rather than being treated as frontend-only settings.
+
+### 7. Complete Secret Lifecycle
+
+Secrets can move through controlled lifecycle states:
+
+- `ACTIVE`
+- `VIEWED`
+- `EXPIRED`
+- `REVOKED`
+- `BURNED`
+- `DELETED`
+
+The system supports:
+
+- Time-based expiration
+- View-limit expiration
+- Burn-after-reading
+- Instant revocation
 - Automatic deletion
 
-Secrets can move through states such as:
+### 8. Instant Revocation
 
-- Active
-- Viewed
-- Expired
-- Revoked
-- Burned
-- Deleted
+The owner can immediately revoke a secret using a separate `ownerToken`.
 
-The backend checks these policies before allowing access.
+This allows the creator to invalidate access before the normal expiration condition is reached.
 
-### 6. Self-Healing Storage
+### 9. Automatic Deletion
 
-SecureBin includes a recovery mechanism for row-level corruption of encrypted data.
+Secrets that reach their terminal lifecycle state are permanently removed through a background deletion process.
 
-- SHA-256 is used to verify the integrity of stored encrypted data.
-- A redundant encrypted backup is maintained.
-- If corruption is detected, the system can recover the encrypted record from the backup.
-- The recovered data is verified before being used.
+This prevents expired or revoked secrets from remaining stored indefinitely.
 
-This feature is designed for storage-level corruption and bad writes, not complete database failure.
+### 10. Expiration and Status Tracking
 
-### 7. Security Analysis and Recommendations
+The `/status` endpoint provides lifecycle and expiration information for an active secret.
 
-SecureBin can identify recognizable sensitive patterns in content before encryption.
+This allows the application to keep track of the remaining lifetime and current state of the secret.
 
-Examples include:
+### 11. Intelligent Security Analysis
+
+SecureBin performs security analysis on the client side before the secret is stored.
+
+It can detect recognizable patterns such as:
 
 - API keys
 - AWS access keys
@@ -91,52 +118,57 @@ Examples include:
 - Password-related content
 - Email addresses
 
-Based on the detected patterns, SecureBin provides a heuristic security score and recommendations such as using a shorter expiry or burn-after-reading.
+The system also performs automatic secret-type detection and provides security recommendations.
 
-The analysis result is encrypted before storage, so the backend does not need access to the original plaintext.
+### 12. Security Score
 
-### 8. Secure File Sharing
+The security score combines two areas:
 
-SecureBin supports both text and files.
+- Content-sensitivity analysis
+- Configuration-based security settings
 
-For files, the system protects:
+The content analysis is encrypted before being stored, so the backend does not need access to the original plaintext.
 
-- File contents
+### 13. Client-Side File Encryption
+
+SecureBin supports files as well as text secrets.
+
+Files are encrypted on the client side before being sent to the backend.
+
+The system also protects file metadata such as:
+
 - Filename
 - MIME type
 - File size
 
-Encrypting metadata is important because information such as a filename can itself reveal sensitive details.
+### 14. Privacy-Minimized Statistics
 
-### 9. Privacy-Minimized Statistics
+SecureBin provides useful access information without unnecessarily tracking users.
 
-Creators can monitor their secrets through information such as:
+The system can provide:
 
 - Successful and failed access attempts
 - Viewer-wise access counts
-- First and last access times
+- Access timestamps
 - Current secret status
 
-SecureBin deliberately avoids unnecessary logging of:
+The backend deliberately does not log:
 
 - IP addresses
 - User agents
-- Complete request headers
 
-### 10. Integrity and Access Control
+Privacy-preserving statistics are available through the `/stats` endpoint.
 
-Security in SecureBin is not limited to encryption.
+### 15. Self-Healing Encrypted Storage
 
-The system combines:
+SecureBin includes a recovery mechanism for row-level corruption of encrypted data.
 
-- Encryption
-- Password-based key protection
-- Viewer-specific access
-- Lifecycle policies
-- Revocation
-- Integrity verification
-- Storage recovery
-- Privacy-minimized monitoring
+- A checksum is used to verify the integrity of stored encrypted data.
+- A redundant encrypted backup is maintained.
+- If corruption is detected, the system can restore the encrypted record from the backup.
+- The recovered data is verified before being used.
+
+This is designed for storage-level corruption and bad writes, not complete database failure.
 
 ---
 
@@ -146,43 +178,44 @@ The system combines:
 
 The actual secret content is encrypted using AES-256-GCM through the browser's Web Crypto API.
 
-GCM provides both:
+AES-GCM provides:
 
 - Confidentiality
-- Authentication/tamper detection
+- Authentication
+- Tamper detection
 
 ### Password-Based Key Derivation
 
-SecureBin uses:
+Viewer passwords are processed using:
 
 - PBKDF2
 - SHA-256
 - 600,000 iterations
-- A separate random salt for each viewer
+- Individual random salts
 
 ### Envelope Encryption
 
-The secret is encrypted using a random AES-256 master key.
+A random master encryption key is used to encrypt the actual secret.
 
 The master key is then individually wrapped for each authorized viewer.
 
-This allows different viewers to use different passwords while accessing the same encrypted secret.
+This allows multiple viewers to access the same encrypted secret while using separate passwords.
 
 ---
 
 ## How SecureBin Handles a Secret
 
-A secret goes through the following general process:
+The general process is:
 
 1. The creator enters a secret or uploads a file.
-2. The client generates the required encryption keys.
+2. The client generates the required cryptographic keys.
 3. The content is encrypted locally.
 4. Viewer-specific key material is created where required.
 5. Only encrypted information is sent to the backend.
-6. The backend applies the configured access policies.
-7. Access attempts are recorded using privacy-minimized statistics.
-8. The encrypted data is integrity-checked when accessed.
-9. The secret can eventually expire, be revoked, burn after reading, or be permanently deleted.
+6. The Security Policy Engine applies the configured access rules.
+7. Access information is recorded using privacy-minimized statistics.
+8. The encrypted data is checked for integrity when accessed.
+9. The secret eventually expires, is revoked, burns after reading or is permanently deleted according to its lifecycle.
 
 ---
 
@@ -214,7 +247,7 @@ A secret goes through the following general process:
 
 ## Project Structure
 
-The project is divided into three main parts.
+The project is divided into three main areas.
 
 ### Frontend
 
@@ -222,9 +255,10 @@ Handles:
 
 - User interface
 - Secret creation
-- Sharing
+- Secret sharing
 - Secret viewing
 - User interaction
+- Lifecycle information
 
 ### Cryptographic Layer
 
@@ -235,7 +269,10 @@ Handles:
 - Password-based key derivation
 - Key wrapping
 - File encryption
-- Security analysis
+- Sensitive-data detection
+- Secret-type detection
+- Security scoring
+- Security recommendations
 
 ### Backend
 
@@ -243,19 +280,19 @@ Handles:
 
 - API requests
 - Encrypted secret storage
-- Access policies
+- Security policies
 - Lifecycle management
 - Revocation
 - Access statistics
 - Integrity verification
-- Storage recovery
-- Deletion
+- Self-healing recovery
+- Automatic deletion
 
 ---
 
 ## SecureBin vs PrivateBin
 
-PrivateBin was the starting inspiration for our project.
+PrivateBin was the starting inspiration for our secure-sharing concept.
 
 Instead of stopping at encrypted paste sharing, SecureBin focuses on managing the **entire lifecycle of a secret**.
 
@@ -264,16 +301,20 @@ Some of the major additions in SecureBin are:
 - Decryption material separated from the URL
 - Multi-viewer access with individual passwords
 - Individually wrapped encryption keys
+- Security Policy Engine
 - Time-based expiration
-- View-based limits
+- View-limit expiration
 - Burn-after-reading
-- Manual revocation
+- Instant revocation
+- Automatic deletion
+- Intelligent security analysis
+- Automatic secret-type detection
 - Security scoring and recommendations
 - Encrypted file metadata
 - Privacy-minimized access statistics
 - Self-healing encrypted storage
 
-The goal was not simply to recreate PrivateBin with a different interface. We wanted to explore how secure sharing could be extended into a more complete system where the creator has control over **who can access a secret, how it can be accessed, how long it exists, and what happens when something goes wrong with its stored encrypted data.**
+The goal was not simply to recreate PrivateBin with a different interface. We wanted to explore how secure sharing could be extended into a more complete system where the creator has control over **who can access a secret, how it can be accessed, how long it exists, and what happens when its stored encrypted data becomes corrupted.**
 
 ---
 
@@ -283,22 +324,31 @@ The main principle behind SecureBin is:
 
 > **The server should be able to manage an encrypted secret without being trusted with the secret itself.**
 
-Because of this, security is considered at multiple stages:
+Security is therefore considered at multiple stages:
 
 - Protecting the content
 - Protecting the encryption keys
-- Controlling access
-- Controlling the secret's lifetime
+- Controlling viewer access
+- Enforcing lifecycle policies
 - Detecting tampering or corruption
 - Recovering from storage corruption
 - Minimizing unnecessary user data collection
+- Permanently deleting secrets after their lifecycle ends
 
 ---
 
 ## Project
 
-**Live Demo:**
+SecureBin was developed as a team project to explore practical applications of:
+
+- Client-side cryptography
+- Secure key management
+- Access control
+- Secret lifecycle management
+- Privacy-preserving statistics
+- Data integrity
+- Secure storage recovery
+
+### Live Demo
 
 [SecureBin Live Demo](https://clonefest-1-git-main-srscd.vercel.app/securebin-frontend.html)
-
-SecureBin was developed as a team project to explore practical applications of client-side cryptography, secure key management, access control, privacy and secure data lifecycle management.
