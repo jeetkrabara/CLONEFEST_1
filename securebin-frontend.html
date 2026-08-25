@@ -25,7 +25,18 @@
   API_BASE below.
   ══════════════════════════════════════════════════════════════
 -->
-<script type="text/babel" data-presets="react,env">
+<script>
+  // Babel Standalone's auto-scanner also picks up <script type="module"> tags
+  // present in the initial HTML and mishandles them. Fix: inject the real
+  // crypto-loader module AFTER the page (and Babel's scan) has finished.
+  window.addEventListener("load", () => {
+    const s = document.createElement("script");
+    s.type = "module";
+    s.src = "crypto-loader.js";
+    document.body.appendChild(s);
+  });
+</script>
+<script type="text/plain" id="app-source">
 const { useState, useEffect, useCallback, useRef, createContext, useContext, useMemo } = React;
 
 // ═══════════════════════════════════════════════════════════════
@@ -111,40 +122,18 @@ const secretsApi = {
   },
 };
 
-// ── Mock crypto module (replace with real crypto/index.js) ───
+// ── Real crypto module bridge (crypto/index.js, loaded via <script type="module"> above) ───
+// window.SecureCrypto is populated before this script's handlers ever run
+// (module scripts execute during initial page parse, before user interaction).
 
 function analyzeContent(text) {
+  if (!window.SecureCrypto) return { secretType: "unknown", score: 0, recommendations: [] };
   if (!text || text.length < 3) return { secretType: "unknown", score: 0, recommendations: [] };
-  const recs = [];
-  let type = "text";
-  let score = 20;
-  if (/(?:AKIA|AIza|sk-|ghp_|glpat-|xox[bsp]-)/i.test(text)) {
-    type = "api_key";
-    score = 90;
-    recs.push("Contains what looks like an API key — use burn after reading");
-  }
-  if (/(?:password|passwd|pwd)\s*[:=]/i.test(text)) {
-    type = "credential";
-    score = 85;
-    recs.push("Contains what looks like a password — limit views and set expiry");
-  }
-  if (/\b\d{3}[-.]?\d{2}[-.]?\d{4}\b/.test(text)) {
-    type = "pii";
-    score = 80;
-    recs.push("Contains what looks like a SSN — enable all protections");
-  }
-  if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(text)) {
-    if (type === "text") type = "contact_info";
-    score = Math.max(score, 40);
-    recs.push("Contains email addresses — consider view limits");
-  }
-  if (text.length > 500 && type === "text") score = 30;
-  if (recs.length === 0) recs.push("No sensitive patterns detected — standard protection recommended");
-  return { secretType: type, score, recommendations: recs };
+  return window.SecureCrypto.analyzeContent(text);
 }
 
 function isZeroKnowledge() {
-  return typeof window !== "undefined" && typeof window.crypto?.subtle !== "undefined";
+  return window.SecureCrypto ? window.SecureCrypto.isZeroKnowledge() : false;
 }
 
 // ── QR Code Generator (pure SVG, no library) ────────────────
@@ -238,9 +227,10 @@ function useDebounce(value, delay) {
 // ── Simple Client-Side Router ────────────────────────────────
 
 function useRouter() {
-  const [path, setPath] = useState(window.location.hash.slice(1) || "/");
+  const getPath = () => (window.location.hash.slice(1) || "/").split("?")[0];
+  const [path, setPath] = useState(getPath());
   useEffect(() => {
-    const handler = () => setPath(window.location.hash.slice(1) || "/");
+    const handler = () => setPath(getPath());
     window.addEventListener("hashchange", handler);
     return () => window.removeEventListener("hashchange", handler);
   }, []);
@@ -695,25 +685,22 @@ function CreateSecretPage({ navigate }) {
         policy.maxViews = parseInt(maxViews);
       }
 
-      // In production: const envelope = await buildEnvelope(secretText, viewerPasswords);
-      // For demo, we simulate the envelope structure
-      const fakeEnvelope = {
-        ciphertext: btoa(secretText || "file-content"),
-        iv: btoa("123456789012"),
-        viewers: viewerPasswords.map((v) => ({
-          viewerLabel: v.label,
-          wrappedKey: btoa("wrapped-key-" + v.label),
-          kdfSalt: btoa("1234567890123456"),
-          wrapIv: btoa("123456789012"),
-          kdfParams: { iterations: 600000, algorithm: "PBKDF2-SHA256" },
-        })),
-      };
-      if (mode === "text" && analysis.score > 0) {
-        fakeEnvelope.encryptedAnalysis = btoa(JSON.stringify(analysis));
-        fakeEnvelope.analysisIv = btoa("123456789012");
+      if (!window.SecureCrypto) {
+        throw new Error("Encryption module not loaded yet — refresh and try again.");
       }
 
-      const result = await secretsApi.createTextSecret(fakeEnvelope, policy);
+      let result;
+      if (mode === "file") {
+        // Real client-side file encryption — key never leaves the browser.
+        const fileEnvelope = await window.SecureCrypto.buildFileEnvelope(file, viewerPasswords);
+        result = await secretsApi.createFileSecret(fileEnvelope, policy);
+      } else {
+        // Real client-side text encryption (also encrypts the sensitivity
+        // analysis with the same key, so the server never sees it either).
+        const envelope = await window.SecureCrypto.buildEnvelope(secretText, viewerPasswords);
+        result = await secretsApi.createTextSecret(envelope, policy);
+      }
+
       navigate(`/secret/${result.secretId}/share?ownerToken=${encodeURIComponent(result.ownerToken)}`);
     } catch (err) {
       setError(err.message || "Failed to create secret. Check your connection.");
@@ -908,7 +895,7 @@ function SharePage({ navigate, params }) {
   const secretId = params.secretId;
   const searchParams = new URLSearchParams(window.location.hash.split("?")[1] || "");
   const ownerToken = searchParams.get("ownerToken") || "";
-  const shareUrl = `${window.location.origin}/#/secret/${secretId}`;
+  const shareUrl = `${window.location.origin}${window.location.pathname}#/secret/${secretId}`;
 
   return (
     <>
@@ -985,29 +972,40 @@ function ViewSecretPage({ navigate, params }) {
 
     setLoading(true);
     try {
-      // In production:
-      // const { plaintext, analysis } = await openEnvelope(secretId, viewerLabel, password, secretsApi.fetchSecretFn);
-      // For demo, fetch from API and simulate decryption
-      const res = await secretsApi.fetchSecretFn(secretId, viewerLabel.trim());
-      if (!res.ok) {
-        const status = res.status;
-        if (status === 410) throw { code: "VIEW_LIMIT_EXCEEDED" };
-        if (status === 404) throw { code: "NOT_FOUND" };
-        if (status === 400) throw { code: "AUTH_FAILED" };
-        throw { code: "SERVER_ERROR" };
+      if (!window.SecureCrypto) {
+        throw { code: "SERVER_ERROR", message: "Encryption module not loaded yet — refresh and try again." };
       }
-      const data = await res.json();
-      if (data.ciphertext) {
-        // Text secret
-        setSecretType("text");
-        try { setPlaintext(atob(data.ciphertext)); } catch { setPlaintext("[Encrypted content - requires crypto module]"); }
-        if (data.encryptedAnalysis) {
-          try { setAnalysis(JSON.parse(atob(data.encryptedAnalysis))); } catch { /* ignore */ }
-        }
-      } else if (data.encryptedBytes) {
-        // File secret
+
+      // Use the non-consuming /status endpoint to learn text-vs-file before
+      // calling the real (view-consuming) fetch — calling fetchSecretFn twice
+      // would burn two views instead of one and break view-limit/burn logic.
+      let isFile = false;
+      try {
+        const statusInfo = await secretsApi.getSecretStatus(secretId);
+        isFile = statusInfo.type === "file";
+      } catch (statusErr) {
+        // If status itself 404s, let the real fetch below surface the proper error.
+      }
+
+      if (isFile) {
+        const recoveredFile = await window.SecureCrypto.openFileEnvelope(
+          secretId,
+          viewerLabel.trim(),
+          password,
+          secretsApi.fetchSecretFn
+        );
         setSecretType("file");
-        setDecryptedFile({ name: "encrypted-file", size: data.encryptedBytes.length });
+        setDecryptedFile(recoveredFile);
+      } else {
+        const { plaintext, analysis } = await window.SecureCrypto.openEnvelope(
+          secretId,
+          viewerLabel.trim(),
+          password,
+          secretsApi.fetchSecretFn
+        );
+        setSecretType("text");
+        setPlaintext(plaintext);
+        setAnalysis(analysis || null);
       }
     } catch (err) {
       const code = err.code || "SERVER_ERROR";
@@ -1075,7 +1073,19 @@ function ViewSecretPage({ navigate, params }) {
           {secretType === "file" && decryptedFile && (
             <div className="file-download">
               <p>File decrypted successfully.</p>
-              <button className="btn btn-primary">
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  const url = URL.createObjectURL(decryptedFile);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = decryptedFile.name;
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                  URL.revokeObjectURL(url);
+                }}
+              >
                 Download {decryptedFile.name}
               </button>
             </div>
@@ -2203,6 +2213,21 @@ function getStyles() {
 
 const rootEl = document.getElementById("root");
 ReactDOM.render(<App />, rootEl);
+</script>
+<script>
+  // Babel Standalone's automatic script scanner defaults the React preset
+  // to the "automatic" JSX runtime, which needs `import ... from
+  // "react/jsx-runtime"` — incompatible with the classic global React/ReactDOM
+  // UMD build loaded above. We compile manually instead, forcing the
+  // classic runtime, then execute the result.
+  window.addEventListener("load", () => {
+    const source = document.getElementById("app-source").textContent;
+    const compiled = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }], "env"],
+      filename: "app.jsx",
+    }).code;
+    (0, eval)(compiled);
+  });
 </script>
 </body>
 </html>
