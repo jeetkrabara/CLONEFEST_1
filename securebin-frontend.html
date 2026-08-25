@@ -142,7 +142,9 @@ function QRCodeSVG({ data, size = 160 }) {
   const qrRef = React.useRef(null);
 
   React.useEffect(() => {
-    if (!qrRef.current || !data || typeof QRCode === "undefined") return;
+    if (!qrRef.current || !data || typeof QRCode === "undefined") {
+      return;
+    }
 
     qrRef.current.innerHTML = "";
 
@@ -152,7 +154,7 @@ function QRCodeSVG({ data, size = 160 }) {
       height: size,
       colorDark: "#0A0E17",
       colorLight: "#FFFFFF",
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: QRCode.CorrectLevel.H
     });
   }, [data, size]);
 
@@ -162,8 +164,8 @@ function QRCodeSVG({ data, size = 160 }) {
       role="img"
       aria-label="QR code for secret link"
       style={{
-        width: size,
-        height: size,
+        width: `${size}px`,
+        height: `${size}px`,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -173,9 +175,6 @@ function QRCodeSVG({ data, size = 160 }) {
     />
   );
 }
-
-
-
 
 // ── Utility Hooks ────────────────────────────────────────────
 
