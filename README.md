@@ -126,7 +126,6 @@ Revocation
 Integrity verification
 Storage recovery
 Privacy-minimized monitoring
-
 Cryptographic Design
 AES-256-GCM
 
@@ -165,7 +164,6 @@ The backend applies the configured access policies.
 Access attempts are recorded using privacy-minimized statistics.
 The encrypted data is integrity-checked when accessed.
 The secret can eventually expire, be revoked, burn after reading, or be permanently deleted.
-
 Technology Stack
 Frontend
 JavaScript
@@ -183,7 +181,6 @@ PBKDF2-SHA256
 SHA-256
 Web Crypto API
 bcrypt
-
 Project Structure
 
 The project is divided into three main parts:
@@ -220,7 +217,6 @@ Access statistics
 Integrity verification
 Storage recovery
 Deletion
-
 SecureBin vs PrivateBin
 
 PrivateBin was the starting inspiration for our project.
@@ -258,7 +254,6 @@ Controlling the secret's lifetime
 Detecting tampering or corruption
 Recovering from storage corruption
 Minimizing unnecessary user data collection
-
 Project
 
 Live Demo:
