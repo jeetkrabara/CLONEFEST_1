@@ -9,6 +9,7 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -137,55 +138,44 @@ function isZeroKnowledge() {
 }
 
 // ── QR Code Generator (pure SVG, no library) ────────────────
-
-function generateQRMatrix(data) {
-  // Simplified QR-like matrix for display purposes
-  // In production, use a real QR library
-  const size = 25;
-  const matrix = [];
-  let hash = 0;
-  for (let i = 0; i < data.length; i++) {
-    hash = ((hash << 5) - hash + data.charCodeAt(i)) | 0;
-  }
-  for (let r = 0; r < size; r++) {
-    const row = [];
-    for (let c = 0; c < size; c++) {
-      // Finder patterns (top-left, top-right, bottom-left)
-      const inFinderTL = r < 7 && c < 7;
-      const inFinderTR = r < 7 && c >= size - 7;
-      const inFinderBL = r >= size - 7 && c < 7;
-      if (inFinderTL || inFinderTR || inFinderBL) {
-        const lr = inFinderTL ? r : inFinderTR ? r : r - (size - 7);
-        const lc = inFinderTL ? c : inFinderTR ? c - (size - 7) : c;
-        const border = lr === 0 || lr === 6 || lc === 0 || lc === 6;
-        const inner = lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4;
-        row.push(border || inner ? 1 : 0);
-      } else {
-        const seed = (hash + r * 31 + c * 17) & 0xffff;
-        row.push(seed % 3 === 0 ? 1 : 0);
-      }
-    }
-    matrix.push(row);
-  }
-  return matrix;
-}
-
 function QRCodeSVG({ data, size = 160 }) {
-  const matrix = generateQRMatrix(data);
-  const cellSize = size / matrix.length;
+  const qrRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!qrRef.current || !data || typeof QRCode === "undefined") return;
+
+    qrRef.current.innerHTML = "";
+
+    new QRCode(qrRef.current, {
+      text: data,
+      width: size,
+      height: size,
+      colorDark: "#0A0E17",
+      colorLight: "#FFFFFF",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  }, [data, size]);
+
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="QR code for secret link">
-      <rect width={size} height={size} fill="white" rx="4" />
-      {matrix.map((row, r) =>
-        row.map((cell, c) =>
-          cell ? (
-            <rect key={`${r}-${c}`} x={c * cellSize} y={r * cellSize} width={cellSize} height={cellSize} fill="#0A0E17" />
-          ) : null
-        )
-      )}
-    </svg>
+    <div
+      ref={qrRef}
+      role="img"
+      aria-label="QR code for secret link"
+      style={{
+        width: size,
+        height: size,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#FFFFFF",
+        borderRadius: "4px"
+      }}
+    />
   );
 }
+
+
+
 
 // ── Utility Hooks ────────────────────────────────────────────
 
